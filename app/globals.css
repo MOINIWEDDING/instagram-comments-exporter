@@ -306,6 +306,11 @@ button:focus-visible {
   animation: spin 0.7s linear infinite;
 }
 
+.spinner-dark {
+  border-color: var(--border-strong);
+  border-top-color: var(--accent-2);
+}
+
 @keyframes spin {
   to {
     transform: rotate(360deg);

@@ -4,37 +4,14 @@ import { useMemo, useState } from "react";
 import type { ScrapeResult } from "@/lib/types";
 
 function toCsv(results: ScrapeResult[]): string {
-  const header = [
-    "video_url",
-    "shortcode",
-    "comment_id",
-    "es_respuesta",
-    "responde_a_comment_id",
-    "usuario",
-    "comentario",
-    "fecha",
-    "likes",
-  ];
+  const header = ["usuario", "comentario"];
   const rows = [header.join(",")];
 
   const escape = (value: string) => `"${value.replace(/"/g, '""')}"`;
 
   for (const result of results) {
     for (const c of result.comments) {
-      const date = c.timestamp ? new Date(c.timestamp * 1000).toISOString() : "";
-      rows.push(
-        [
-          escape(c.videoUrl),
-          escape(c.shortcode),
-          escape(c.commentId),
-          c.parentCommentId ? "si" : "no",
-          escape(c.parentCommentId ?? ""),
-          escape(c.username),
-          escape(c.text),
-          escape(date),
-          String(c.likeCount ?? ""),
-        ].join(",")
-      );
+      rows.push([escape(c.username), escape(c.text)].join(","));
     }
   }
 
@@ -51,6 +28,167 @@ function downloadCsv(csv: string) {
   a.click();
   a.remove();
   URL.revokeObjectURL(url);
+}
+
+const PDF_WIDTH = 1280;
+const PDF_HEIGHT = 720;
+const PDF_MARGIN = 48;
+const PDF_PURPLE: [number, number, number] = [88, 60, 172];
+const PDF_PINK: [number, number, number] = [193, 53, 132];
+const PDF_TEXT: [number, number, number] = [26, 26, 32];
+const PDF_MUTED: [number, number, number] = [110, 110, 125];
+
+function formatPdfDate(timestamp: number | null): string {
+  if (!timestamp) return "—";
+  const d = new Date(timestamp * 1000);
+  return d.toLocaleDateString("es-ES", { day: "2-digit", month: "2-digit", year: "numeric" });
+}
+
+async function downloadPdf(results: ScrapeResult[]) {
+  const [{ default: JsPDF }, { default: autoTable }] = await Promise.all([
+    import("jspdf"),
+    import("jspdf-autotable"),
+  ]);
+
+  const doc = new JsPDF({ unit: "px", format: [PDF_WIDTH, PDF_HEIGHT] });
+  const totalComments = results.reduce((sum, r) => sum + r.comments.length, 0);
+  const totalReplies = results.reduce(
+    (sum, r) => sum + r.comments.filter((c) => c.parentCommentId).length,
+    0
+  );
+
+  // Cover page
+  doc.setFillColor(...PDF_PURPLE);
+  doc.roundedRect(PDF_MARGIN, 90, PDF_WIDTH - PDF_MARGIN * 2, 8, 4, 4, "F");
+
+  doc.setTextColor(...PDF_TEXT);
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(34);
+  doc.text("Comentarios de Instagram", PDF_MARGIN, 160);
+
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(13);
+  doc.setTextColor(...PDF_MUTED);
+  const exportedAt = new Date().toLocaleString("es-ES", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+  doc.text(`Exportado el ${exportedAt}`, PDF_MARGIN, 188);
+
+  const stats: [string, string][] = [
+    [String(results.length), "Videos"],
+    [String(totalComments), "Comentarios totales"],
+    [String(totalReplies), "Respuestas"],
+  ];
+  const cardWidth = 220;
+  const cardGap = 24;
+  stats.forEach(([value, label], i) => {
+    const x = PDF_MARGIN + i * (cardWidth + cardGap);
+    const y = 260;
+    doc.setDrawColor(225, 225, 235);
+    doc.setLineWidth(1);
+    doc.roundedRect(x, y, cardWidth, 110, 12, 12, "S");
+    doc.setTextColor(...PDF_PURPLE);
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(30);
+    doc.text(value, x + 20, y + 55);
+    doc.setTextColor(...PDF_MUTED);
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(11);
+    doc.text(label, x + 20, y + 82);
+  });
+
+  doc.setTextColor(...PDF_MUTED);
+  doc.setFontSize(10);
+  doc.text(
+    "Generado con Comment Export — instagram-comments-exporter.vercel.app",
+    PDF_MARGIN,
+    PDF_HEIGHT - 40
+  );
+
+  for (const result of results) {
+    if (result.comments.length === 0) continue;
+
+    doc.addPage([PDF_WIDTH, PDF_HEIGHT]);
+
+    doc.setFillColor(...PDF_PINK);
+    doc.roundedRect(PDF_MARGIN, 40, 6, 32, 3, 3, "F");
+
+    doc.setTextColor(...PDF_TEXT);
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(16);
+    const urlLine = doc.splitTextToSize(result.url, PDF_WIDTH - PDF_MARGIN * 2 - 20)[0];
+    doc.text(urlLine, PDF_MARGIN + 22, 64);
+
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(11);
+    doc.setTextColor(...PDF_MUTED);
+    const replyCount = result.comments.filter((c) => c.parentCommentId).length;
+    doc.text(
+      `${result.comments.length} comentarios${replyCount ? ` · ${replyCount} respuestas` : ""}`,
+      PDF_MARGIN + 22,
+      84
+    );
+
+    const body = result.comments.map((c) => [
+      c.parentCommentId ? `↳ ${c.username}` : c.username,
+      c.text,
+      formatPdfDate(c.timestamp),
+      c.likeCount != null ? String(c.likeCount) : "—",
+    ]);
+
+    autoTable(doc, {
+      head: [["Usuario", "Comentario", "Fecha", "Likes"]],
+      body,
+      startY: 110,
+      margin: { left: PDF_MARGIN, right: PDF_MARGIN, bottom: 40 },
+      theme: "striped",
+      styles: {
+        fontSize: 9.5,
+        cellPadding: 8,
+        textColor: PDF_TEXT,
+        lineColor: [235, 235, 242],
+        overflow: "linebreak",
+        valign: "top",
+      },
+      headStyles: {
+        fillColor: PDF_PURPLE,
+        textColor: 255,
+        fontStyle: "bold",
+        fontSize: 10.5,
+      },
+      alternateRowStyles: { fillColor: [247, 247, 251] },
+      columnStyles: {
+        0: { cellWidth: 170 },
+        1: { cellWidth: "auto" },
+        2: { cellWidth: 100 },
+        3: { cellWidth: 60, halign: "right" },
+      },
+      didParseCell: (data) => {
+        if (data.section === "body" && data.column.index === 0) {
+          const raw = data.cell.raw;
+          if (typeof raw === "string" && raw.startsWith("↳")) {
+            data.cell.styles.textColor = PDF_MUTED;
+            data.cell.styles.fontStyle = "italic";
+          }
+        }
+      },
+    });
+  }
+
+  const pageCount = doc.getNumberOfPages();
+  for (let i = 2; i <= pageCount; i++) {
+    doc.setPage(i);
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(9);
+    doc.setTextColor(...PDF_MUTED);
+    doc.text(`Página ${i - 1} de ${pageCount - 1}`, PDF_WIDTH - PDF_MARGIN - 70, PDF_HEIGHT - 20);
+  }
+
+  doc.save(`comentarios-instagram-${Date.now()}.pdf`);
 }
 
 const AVATAR_COLORS = ["#405de6", "#833ab4", "#c13584", "#e1306c", "#fd8d1d", "#1a9e7a", "#0e8fd9"];
@@ -137,6 +275,17 @@ function IconDownload() {
   );
 }
 
+function IconFileText() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z" />
+      <polyline points="14 2 14 8 20 8" />
+      <line x1="8" y1="13" x2="16" y2="13" />
+      <line x1="8" y1="17" x2="13" y2="17" />
+    </svg>
+  );
+}
+
 function IconReply() {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -158,6 +307,7 @@ function IconInbox() {
 export default function Home() {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
+  const [pdfLoading, setPdfLoading] = useState(false);
   const [results, setResults] = useState<ScrapeResult[]>([]);
   const [requestError, setRequestError] = useState<string | null>(null);
 
@@ -204,6 +354,15 @@ export default function Home() {
       setRequestError(err instanceof Error ? err.message : "Error de red.");
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function handlePdfExport() {
+    setPdfLoading(true);
+    try {
+      await downloadPdf(results);
+    } finally {
+      setPdfLoading(false);
     }
   }
 
@@ -265,6 +424,14 @@ export default function Home() {
           >
             <IconDownload />
             Descargar CSV ({totalComments})
+          </button>
+          <button
+            className="btn-secondary"
+            disabled={totalComments === 0 || pdfLoading}
+            onClick={handlePdfExport}
+          >
+            {pdfLoading ? <span className="spinner spinner-dark" /> : <IconFileText />}
+            {pdfLoading ? "Generando PDF…" : "Exportar PDF"}
           </button>
         </div>
         {requestError && (
