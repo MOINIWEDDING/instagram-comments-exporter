@@ -3,8 +3,6 @@ import type { CommentItem } from "./types";
 const APP_ID = "936619743392459";
 const BROWSER_USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
-const PRIVATE_API_USER_AGENT =
-  "Instagram 275.0.0.27.98 Android (33/13; 420dpi; 1080x2137; samsung; SM-G991B; o1s; exynos2100; en_US; 458229258)";
 
 const SHORTCODE_ALPHABET =
   "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
@@ -33,15 +31,15 @@ export function shortcodeToMediaId(shortcode: string): string {
   return mediaId.toString();
 }
 
-function buildSessionCookie(): string | null {
+function buildSession(): { cookie: string; csrfToken: string } | null {
   const sessionId = process.env.IG_SESSIONID;
   if (!sessionId) return null;
   const dsUserId = process.env.IG_DS_USER_ID;
-  const csrfToken = process.env.IG_CSRFTOKEN;
+  const csrfToken = process.env.IG_CSRFTOKEN ?? "missing";
   const parts = [`sessionid=${sessionId}`];
   if (dsUserId) parts.push(`ds_user_id=${dsUserId}`);
-  parts.push(`csrftoken=${csrfToken ?? "missing"}`);
-  return parts.join("; ");
+  parts.push(`csrftoken=${csrfToken}`);
+  return { cookie: parts.join("; "), csrfToken };
 }
 
 interface PrivateApiComment {
@@ -50,25 +48,39 @@ interface PrivateApiComment {
   created_at?: number;
   comment_like_count?: number;
   user?: { username?: string };
+  parent_comment_id?: string | number;
+  child_comment_count?: number;
+  preview_child_comments?: PrivateApiComment[];
+  has_more_tail_child_comments?: boolean;
+  next_max_child_cursor?: string;
 }
 
-async function fetchCommentsPageAuthenticated(
-  mediaId: string,
-  cookie: string,
-  minId: string | undefined
-): Promise<{ comments: PrivateApiComment[]; nextMinId: string | null; hasMore: boolean }> {
-  const url = new URL(`https://i.instagram.com/api/v1/media/${mediaId}/comments/`);
-  url.searchParams.set("can_support_threading", "true");
-  url.searchParams.set("permalink_enabled", "false");
-  if (minId) url.searchParams.set("min_id", minId);
+function igHeaders(shortcode: string, cookie: string, csrfToken: string): HeadersInit {
+  return {
+    "User-Agent": BROWSER_USER_AGENT,
+    "X-IG-App-ID": APP_ID,
+    "X-CSRFToken": csrfToken,
+    "X-Requested-With": "XMLHttpRequest",
+    "X-ASBD-ID": "198387",
+    "X-IG-WWW-Claim": "0",
+    Accept: "*/*",
+    Origin: "https://www.instagram.com",
+    Referer: `https://www.instagram.com/p/${shortcode}/`,
+    "Sec-Fetch-Site": "same-origin",
+    "Sec-Fetch-Mode": "cors",
+    "Sec-Fetch-Dest": "empty",
+    Cookie: cookie,
+  };
+}
 
-  const res = await fetch(url.toString(), {
-    headers: {
-      "User-Agent": PRIVATE_API_USER_AGENT,
-      "X-IG-App-ID": APP_ID,
-      Accept: "*/*",
-      Cookie: cookie,
-    },
+async function igApiFetch(
+  url: string,
+  shortcode: string,
+  cookie: string,
+  csrfToken: string
+): Promise<any> {
+  const res = await fetch(url, {
+    headers: igHeaders(shortcode, cookie, csrfToken),
     cache: "no-store",
   });
 
@@ -81,6 +93,13 @@ async function fetchCommentsPageAuthenticated(
     throw new Error(`Instagram respondió ${res.status} al pedir comentarios.`);
   }
 
+  const contentType = res.headers.get("content-type") ?? "";
+  if (!contentType.includes("application/json")) {
+    throw new InstagramAuthRequiredError(
+      "Instagram devolvió una página en vez de datos (probablemente detectó la sesión como sospechosa o pide reautenticación). Corré 'npm run get-session' de nuevo para refrescar la sesión."
+    );
+  }
+
   const data = await res.json();
   if (data?.status && data.status !== "ok") {
     if (data?.message?.toLowerCase?.().includes("login")) {
@@ -89,11 +108,58 @@ async function fetchCommentsPageAuthenticated(
     throw new Error(data?.message ?? "Respuesta inesperada de Instagram.");
   }
 
+  return data;
+}
+
+async function fetchCommentsPageAuthenticated(
+  shortcode: string,
+  mediaId: string,
+  cookie: string,
+  csrfToken: string,
+  minId: string | undefined
+): Promise<{ comments: PrivateApiComment[]; nextMinId: string | null; hasMore: boolean }> {
+  const url = new URL(`https://www.instagram.com/api/v1/media/${mediaId}/comments/`);
+  url.searchParams.set("can_support_threading", "true");
+  url.searchParams.set("permalink_enabled", "false");
+  if (minId) url.searchParams.set("min_id", minId);
+
+  const data = await igApiFetch(url.toString(), shortcode, cookie, csrfToken);
+
   const comments: PrivateApiComment[] = data.comments ?? [];
   const nextMinId: string | null = data.next_min_id ?? null;
   const hasMore: boolean = Boolean(data.has_more_headload_comments ?? data.has_more_comments ?? nextMinId);
 
   return { comments, nextMinId, hasMore };
+}
+
+async function fetchAllReplies(
+  shortcode: string,
+  mediaId: string,
+  commentId: string,
+  cookie: string,
+  csrfToken: string,
+  deadlineMs: number
+): Promise<PrivateApiComment[]> {
+  const collected: PrivateApiComment[] = [];
+  let cursor: string | undefined;
+
+  while (Date.now() < deadlineMs) {
+    const url = new URL(
+      `https://www.instagram.com/api/v1/media/${mediaId}/comments/${commentId}/child_comments/`
+    );
+    if (cursor) url.searchParams.set("max_id", cursor);
+
+    const data = await igApiFetch(url.toString(), shortcode, cookie, csrfToken);
+    const children: PrivateApiComment[] = data.child_comments ?? [];
+    collected.push(...children);
+
+    const hasMore = Boolean(data.has_more_tail_child_comments);
+    const nextCursor: string | undefined = data.next_max_child_cursor;
+    if (!hasMore || !nextCursor) break;
+    cursor = nextCursor;
+  }
+
+  return collected;
 }
 
 async function fetchAnonymous(shortcode: string): Promise<PrivateApiComment[] | null> {
@@ -129,6 +195,45 @@ async function fetchAnonymous(shortcode: string): Promise<PrivateApiComment[] | 
   }
 }
 
+async function attachReplies(
+  shortcode: string,
+  mediaId: string,
+  topLevel: PrivateApiComment[],
+  session: { cookie: string; csrfToken: string },
+  deadlineMs: number
+): Promise<PrivateApiComment[]> {
+  const result: PrivateApiComment[] = [];
+
+  for (const comment of topLevel) {
+    result.push(comment);
+
+    const previewReplies = comment.preview_child_comments ?? [];
+    const childCount = comment.child_comment_count ?? 0;
+    if (childCount === 0) continue;
+
+    if (childCount > previewReplies.length && Date.now() < deadlineMs) {
+      try {
+        const fullReplies = await fetchAllReplies(
+          shortcode,
+          mediaId,
+          String(comment.pk),
+          session.cookie,
+          session.csrfToken,
+          deadlineMs
+        );
+        result.push(...(fullReplies.length > 0 ? fullReplies : previewReplies));
+        continue;
+      } catch {
+        // Fall through to preview replies below.
+      }
+    }
+
+    result.push(...previewReplies);
+  }
+
+  return result;
+}
+
 export interface CommentFetchOutcome {
   comments: CommentItem[];
   mode: "authenticated" | "anonymous" | "none";
@@ -142,21 +247,30 @@ export async function fetchCommentsForShortcode(
   deadlineMs: number
 ): Promise<CommentFetchOutcome> {
   const mediaId = shortcodeToMediaId(shortcode);
-  const cookie = buildSessionCookie();
+  const session = buildSession();
 
-  if (cookie) {
+  if (session) {
     const collected: PrivateApiComment[] = [];
     let minId: string | undefined = undefined;
     try {
       while (collected.length < maxComments && Date.now() < deadlineMs) {
-        const page = await fetchCommentsPageAuthenticated(mediaId, cookie, minId);
+        const page = await fetchCommentsPageAuthenticated(
+          shortcode,
+          mediaId,
+          session.cookie,
+          session.csrfToken,
+          minId
+        );
         collected.push(...page.comments);
         if (!page.hasMore || !page.nextMinId) break;
         minId = page.nextMinId;
       }
+
+      const withReplies = await attachReplies(shortcode, mediaId, collected, session, deadlineMs);
+
       return {
         mode: "authenticated",
-        comments: mapComments(videoUrl, shortcode, collected.slice(0, maxComments)),
+        comments: mapComments(videoUrl, shortcode, withReplies.slice(0, maxComments * 4)),
       };
     } catch (err) {
       if (err instanceof InstagramAuthRequiredError) {
@@ -190,6 +304,7 @@ function mapComments(videoUrl: string, shortcode: string, raw: PrivateApiComment
       videoUrl,
       shortcode,
       commentId: String(c.pk ?? `${shortcode}-${Math.random()}`),
+      parentCommentId: c.parent_comment_id != null ? String(c.parent_comment_id) : null,
       username: c.user?.username ?? "desconocido",
       text: c.text,
       timestamp: c.created_at ?? null,

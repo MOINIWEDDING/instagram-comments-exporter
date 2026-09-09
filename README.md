@@ -1,7 +1,8 @@
 # Exportador de comentarios de Instagram
 
-App en Next.js para pegar URLs de reels/videos públicos de Instagram, ver sus comentarios en un
-dashboard y exportarlos a CSV. Pensada para desplegarse en Vercel.
+App en Next.js para pegar URLs de reels/videos públicos de Instagram, ver sus comentarios (incluidas
+las respuestas a comentarios) en un dashboard y exportarlos a CSV. Pensada para desplegarse en
+Vercel.
 
 ## ⚠️ Aviso importante
 
@@ -24,11 +25,25 @@ da acceso a comentarios de publicaciones de **tu propia cuenta** Business/Creato
 
 ## Cómo obtener `IG_SESSIONID`
 
+### Opción automática (recomendada)
+
+```bash
+npm run get-session
+```
+
+Esto abre un navegador real apuntando a instagram.com. Iniciá sesión ahí normalmente (con tu
+2FA si tenés). El script nunca ve ni guarda tu contraseña — la escribís directo en la página real
+de Instagram. En cuanto detecta el login, extrae las cookies necesarias y las escribe en
+`.env.local` automáticamente, y las imprime en la terminal para que las copies a Vercel.
+
+### Opción manual
+
 1. Inicia sesión en instagram.com desde Chrome/Firefox con la cuenta que quieras usar.
 2. Abre las herramientas de desarrollador → pestaña **Application/Storage** → **Cookies** →
    `https://www.instagram.com`.
 3. Copia el valor de la cookie `sessionid` (y opcionalmente `ds_user_id` y `csrftoken`).
-4. Nunca compartas estos valores: equivalen a estar logueado en esa cuenta.
+
+En ambos casos: nunca compartas estos valores, equivalen a estar logueado en esa cuenta.
 
 ## Desarrollo local
 
@@ -48,15 +63,23 @@ Abre http://localhost:3000.
    `IG_DS_USER_ID` / `IG_CSRFTOKEN`).
 4. Deploy.
 
+Cuando la sesión expire, corré `npm run get-session` de nuevo y después `npm run push-session` para
+subir los valores nuevos a Vercel (production y preview) automáticamente vía su CLI — te pide loguearte
+la primera vez (`npx vercel login`) y vincular el proyecto (`npx vercel link`).
+
 ## Cómo funciona
 
 - `lib/instagram.ts`: convierte el shortcode del URL en un `media_id` (algoritmo público, sin red)
-  y pagina comentarios desde el endpoint interno `i.instagram.com/api/v1/media/{id}/comments/`
-  usando la cookie de sesión configurada. Si no hay sesión configurada, intenta un modo anónimo
-  best-effort que rara vez trae resultados completos.
-- `app/api/comments/route.ts`: recibe hasta 10 URLs por solicitud, hasta 300 comentarios por
-  video, con un presupuesto de tiempo de ~50s para no exceder el límite de función serverless.
-- `app/page.tsx`: UI para pegar URLs, ver el dashboard de resultados y descargar el CSV.
+  y pagina comentarios desde el endpoint web `www.instagram.com/api/v1/media/{id}/comments/`
+  usando la cookie de sesión configurada. Para cada comentario con más respuestas de las que trae
+  el preview, pagina también `.../comments/{id}/child_comments/` para traerlas todas. Si no hay
+  sesión configurada, intenta un modo anónimo best-effort que rara vez trae resultados completos.
+- `app/api/comments/route.ts`: recibe hasta 10 URLs por solicitud, hasta 300 comentarios de primer
+  nivel por video (las respuestas se suman aparte), con un presupuesto de tiempo de ~50s para no
+  exceder el límite de función serverless.
+- `app/page.tsx`: UI para pegar URLs, ver el dashboard de resultados (respuestas indentadas y
+  marcadas con un ícono) y descargar el CSV, que incluye columnas `es_respuesta` y
+  `responde_a_comment_id`.
 
 ## Límites conocidos
 

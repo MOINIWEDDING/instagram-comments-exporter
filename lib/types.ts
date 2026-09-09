@@ -2,6 +2,7 @@ export interface CommentItem {
   videoUrl: string;
   shortcode: string;
   commentId: string;
+  parentCommentId: string | null;
   username: string;
   text: string;
   timestamp: number | null;

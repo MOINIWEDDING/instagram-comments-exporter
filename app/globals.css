@@ -565,6 +565,27 @@ button:focus-visible {
   white-space: nowrap;
 }
 
+.reply-row td {
+  background: var(--bg-subtle);
+}
+
+.reply-row .col-user {
+  padding-left: 32px;
+}
+
+.reply-row .user-cell svg {
+  width: 13px;
+  height: 13px;
+  color: var(--text-faint);
+  flex-shrink: 0;
+}
+
+@media (max-width: 640px) {
+  .reply-row .col-user {
+    padding-left: 16px;
+  }
+}
+
 .comment-text {
   color: var(--text);
   line-height: 1.5;

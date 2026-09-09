@@ -4,7 +4,17 @@ import { useMemo, useState } from "react";
 import type { ScrapeResult } from "@/lib/types";
 
 function toCsv(results: ScrapeResult[]): string {
-  const header = ["video_url", "shortcode", "usuario", "comentario", "fecha", "likes"];
+  const header = [
+    "video_url",
+    "shortcode",
+    "comment_id",
+    "es_respuesta",
+    "responde_a_comment_id",
+    "usuario",
+    "comentario",
+    "fecha",
+    "likes",
+  ];
   const rows = [header.join(",")];
 
   const escape = (value: string) => `"${value.replace(/"/g, '""')}"`;
@@ -16,6 +26,9 @@ function toCsv(results: ScrapeResult[]): string {
         [
           escape(c.videoUrl),
           escape(c.shortcode),
+          escape(c.commentId),
+          c.parentCommentId ? "si" : "no",
+          escape(c.parentCommentId ?? ""),
           escape(c.username),
           escape(c.text),
           escape(date),
@@ -124,6 +137,15 @@ function IconDownload() {
   );
 }
 
+function IconReply() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <polyline points="9 17 4 12 9 7" />
+      <path d="M20 18v-2a4 4 0 0 0-4-4H4" />
+    </svg>
+  );
+}
+
 function IconInbox() {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
@@ -143,6 +165,10 @@ export default function Home() {
 
   const totalComments = useMemo(
     () => results.reduce((sum, r) => sum + r.comments.length, 0),
+    [results]
+  );
+  const totalReplies = useMemo(
+    () => results.reduce((sum, r) => sum + r.comments.filter((c) => c.parentCommentId).length, 0),
     [results]
   );
   const okCount = results.filter((r) => r.ok).length;
@@ -280,6 +306,10 @@ export default function Home() {
               <div className="value">{totalComments}</div>
               <div className="label">Comentarios totales</div>
             </div>
+            <div className="stat">
+              <div className="value">{totalReplies}</div>
+              <div className="label">Son respuestas</div>
+            </div>
           </div>
 
           <p className="section-heading">Resultados por video</p>
@@ -317,9 +347,10 @@ export default function Home() {
                   </thead>
                   <tbody>
                     {result.comments.map((c) => (
-                      <tr key={c.commentId}>
+                      <tr key={c.commentId} className={c.parentCommentId ? "reply-row" : undefined}>
                         <td className="col-user" data-label="Usuario">
                           <div className="user-cell">
+                            {c.parentCommentId && <IconReply />}
                             <span className="avatar" style={{ background: avatarColor(c.username) }}>
                               {initials(c.username)}
                             </span>
