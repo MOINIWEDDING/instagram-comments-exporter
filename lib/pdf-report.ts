@@ -100,7 +100,8 @@ export async function renderPdfReport(input: ExportInput) {
     import("jspdf-autotable"),
   ]);
 
-  const { analysis, filters, results } = input;
+  const { analysis, filters, results, insights } = input;
+  const engineLabel = input.engine === "gemini" ? "Clasificado con IA (Gemini)" : "Clasificado por palabras clave";
   const stats: ReportStats = computeReportStats(input.allResults, analysis, filters);
   const doc = new JsPDF({ unit: "px", format: [W, H], orientation: "portrait" });
   const exportedAt = new Date().toLocaleDateString("es-ES", { day: "numeric", month: "long", year: "numeric" });
@@ -620,7 +621,7 @@ export async function renderPdfReport(input: ExportInput) {
     cardTitle("Distribución del sentimiento", M + 20, y + 34, "spark");
     font(9);
     color(MUTED);
-    doc.text(`${s.total} comentarios clasificados`, W - M - 20, y + 34, { align: "right" });
+    doc.text(`${s.total} comentarios · ${engineLabel}`, W - M - 20, y + 34, { align: "right" });
     const colW = (CW - 40) / 3;
     (["positive", "neutral", "negative"] as Sentiment[]).forEach((k, i) => {
       const cx = M + 20 + i * colW;
@@ -635,6 +636,56 @@ export async function renderPdfReport(input: ExportInput) {
     });
     sentimentBar(s, M + 20, y + 140, CW - 40, 10);
     y += 192;
+  }
+
+  // ——— Análisis escrito por la IA ———
+
+  if (insights) {
+    font(11);
+    const summaryLines = lines(clean(insights.summary), CW - 48, 8);
+    font(10.5, "italic");
+    const opinionLines = lines(clean(insights.audienceOpinion), CW - 76, 4);
+    const themes = insights.recurringThemes.map(clean).filter(Boolean).slice(0, 6);
+    const h = 66 + summaryLines.length * 16 + 22 + opinionLines.length * 15 + 34 + (themes.length ? 56 : 0);
+    heading("Análisis", "de la IA", "Lectura de la conversación escrita por Gemini a partir de los comentarios.", h + 20);
+    card(M, y, CW, h);
+    gradient(M, y, 6, h, 0, BLUE, CYAN, "vertical");
+    cardTitle("Resumen", M + 24, y + 34, "spark");
+    let ay = y + 62;
+    font(11);
+    color(TEXT);
+    summaryLines.forEach((l, i) => doc.text(l, M + 24, ay + i * 16));
+    ay += summaryLines.length * 16 + 10;
+
+    const boxH = opinionLines.length * 15 + 34;
+    fill(BLUE_SOFT);
+    doc.roundedRect(M + 20, ay, CW - 40, boxH, 12, 12, "F");
+    font(8.5, "bold");
+    color(BLUE);
+    doc.text("QUÉ OPINA LA AUDIENCIA", M + 36, ay + 18);
+    font(10.5, "italic");
+    color(NAVY);
+    opinionLines.forEach((l, i) => doc.text(l, M + 36, ay + 36 + i * 15));
+    ay += boxH + 22;
+
+    if (themes.length > 0) {
+      font(8.5, "bold");
+      color(MUTED);
+      doc.text("TEMAS RECURRENTES", M + 24, ay);
+      let tx = M + 24;
+      let ty = ay + 10;
+      themes.forEach((t) => {
+        font(9, "bold");
+        const tw = doc.getTextWidth(t) + 22;
+        if (tx + tw > W - M - 20) {
+          tx = M + 24;
+          ty += 26;
+        }
+        pill(t, tx, ty, BLUE_SOFT, BLUE, 9, 20);
+        tx += tw + 8;
+      });
+    }
+    y += h + 24;
   }
 
   // ——— Rendimiento por video ———
@@ -933,14 +984,21 @@ export async function renderPdfReport(input: ExportInput) {
 
   {
     const colW = (CW - 16) / 2;
+    const strengths = insights?.positives.length ? insights.positives : stats.strengths;
+    const attention = insights?.negatives.length ? insights.negatives : stats.attention;
     const columns: [string, string[], Sentiment][] = [
-      ["Lo que funciona", stats.strengths.length ? stats.strengths : ["Todavía no hay suficientes datos para destacar fortalezas."], "positive"],
-      ["Puntos a atender", stats.attention.length ? stats.attention : ["No se detectaron alertas en los comentarios analizados."], "negative"],
+      ["Lo que funciona", strengths.length ? strengths.slice(0, 4) : ["Todavía no hay suficientes datos para destacar fortalezas."], "positive"],
+      ["Puntos a atender", attention.length ? attention.slice(0, 4) : ["No se detectaron alertas en los comentarios analizados."], "negative"],
     ];
     font(10.5);
     const heights = columns.map(([, items]) => 60 + items.reduce((s, it) => s + lines(clean(it), colW - 70, 4).length * 15 + 30, 0));
     const h = Math.max(...heights);
-    heading("Notas y", "recomendaciones", "Observaciones generadas automáticamente a partir de los datos.", h + 20);
+    heading(
+      "Notas y",
+      "recomendaciones",
+      insights ? "Escritas por Gemini a partir de los comentarios analizados." : "Observaciones generadas automáticamente a partir de los datos.",
+      h + 20
+    );
     columns.forEach(([title, items, tone], ci) => {
       const cx = M + ci * (colW + 16);
       card(cx, y, colW, h);
@@ -963,6 +1021,29 @@ export async function renderPdfReport(input: ExportInput) {
       });
     });
     y += h + 20;
+
+    // Recomendaciones accionables de la IA
+    const recs = (insights?.recommendations ?? []).map(clean).filter(Boolean).slice(0, 4);
+    if (recs.length > 0) {
+      font(10.5);
+      const recLines = recs.map((r) => lines(r, CW - 100, 3));
+      const rh = 62 + recLines.reduce((sum, ls) => sum + ls.length * 15 + 22, 0);
+      need(rh + 20);
+      card(M, y, CW, rh);
+      cardTitle("Recomendaciones", M + 20, y + 34, "spark");
+      let ry = y + 58;
+      recLines.forEach((ls, i) => {
+        gradient(M + 22, ry, 24, 24, 12, BLUE, CYAN);
+        font(10, "bold");
+        color(WHITE);
+        doc.text(String(i + 1), M + 34, ry + 16, { align: "center" });
+        font(10.5);
+        color(TEXT);
+        ls.forEach((l, li) => doc.text(l, M + 60, ry + 16 + li * 15));
+        ry += ls.length * 15 + 22;
+      });
+      y += rh + 20;
+    }
   }
 
   // ——— Listados de comentarios ———

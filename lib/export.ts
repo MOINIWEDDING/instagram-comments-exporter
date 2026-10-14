@@ -1,5 +1,5 @@
 import { SENTIMENT_LABELS } from "./analysis";
-import type { CommentAnalysis, CommentItem, CustomFilter, ScrapeResult } from "./types";
+import type { AiInsights, AnalyzeResponse, CommentAnalysis, CommentItem, CustomFilter, ScrapeResult } from "./types";
 
 export interface ExportInput {
   /** Todos los resultados obtenidos (base para las estadísticas). */
@@ -10,6 +10,10 @@ export interface ExportInput {
   filters: CustomFilter[];
   /** Descripción legible de los filtros activos, p. ej. "Solo negativos · Tema: Precio". */
   activeFilterLabel: string | null;
+  /** Con qué se clasificaron los comentarios. */
+  engine: AnalyzeResponse["engine"] | null;
+  /** Análisis escrito por la IA (solo cuando se analizó con Gemini). */
+  insights: AiInsights | null;
 }
 
 function filterNames(c: CommentItem, input: ExportInput): string {

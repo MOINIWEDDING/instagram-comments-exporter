@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from "react";
 import type {
+  AiInsights,
   AnalyzeResponse,
   CommentAnalysis,
   CustomFilter,
@@ -167,6 +168,7 @@ export default function Home() {
   const [analysis, setAnalysis] = useState<Record<string, CommentAnalysis> | null>(null);
   const [analysisEngine, setAnalysisEngine] = useState<AnalyzeResponse["engine"] | null>(null);
   const [analysisWarning, setAnalysisWarning] = useState<string | null>(null);
+  const [insights, setInsights] = useState<AiInsights | null>(null);
   const [analysisError, setAnalysisError] = useState<string | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
   // Filtros con los que se hizo el último análisis, para saber si quedó desactualizado.
@@ -247,6 +249,8 @@ export default function Home() {
     analysis,
     filters: appliedFilters,
     activeFilterLabel,
+    engine: analysisEngine,
+    insights,
   };
 
   function addFilter(name: string, description: string) {
@@ -266,7 +270,7 @@ export default function Home() {
     if (topicFilter === id) setTopicFilter("all");
   }
 
-  async function handleAnalyze(): Promise<Record<string, CommentAnalysis> | null> {
+  async function handleAnalyze(): Promise<AnalyzeResponse | null> {
     if (allComments.length === 0) return null;
     setAnalyzing(true);
     setAnalysisError(null);
@@ -275,7 +279,7 @@ export default function Home() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          comments: allComments.map((c) => ({ id: c.commentId, text: c.text })),
+          comments: allComments.map((c) => ({ id: c.commentId, text: c.text, likeCount: c.likeCount })),
           filters,
         }),
       });
@@ -288,9 +292,10 @@ export default function Home() {
       setAnalysis(response.analysis);
       setAnalysisEngine(response.engine);
       setAnalysisWarning(response.warning ?? null);
+      setInsights(response.insights ?? null);
       setAnalyzedFilters(filters);
       if (topicFilter !== "all" && !filters.some((f) => f.id === topicFilter)) setTopicFilter("all");
-      return response.analysis;
+      return response;
     } catch (err) {
       setAnalysisError(err instanceof Error ? err.message : "Error de red.");
       return null;
@@ -315,6 +320,7 @@ export default function Home() {
     setAnalysis(null);
     setAnalysisEngine(null);
     setAnalysisWarning(null);
+    setInsights(null);
     setAnalysisError(null);
     setSentimentFilter("all");
     setTopicFilter("all");
@@ -349,8 +355,10 @@ export default function Home() {
           await downloadPdf({
             ...exportInput,
             results: analysis ? filteredResults : results,
-            analysis: fresh,
+            analysis: fresh.analysis,
             filters,
+            engine: fresh.engine,
+            insights: fresh.insights ?? null,
           });
           return;
         }
@@ -584,6 +592,21 @@ export default function Home() {
                 <div className="request-error">
                   <IconAlertCircle />
                   <span>{analysisError}</span>
+                </div>
+              )}
+              {insights && !analysisStale && (
+                <div className="insights">
+                  <p className="insights-label">Análisis de la IA · se incluye en el PDF</p>
+                  <p>{insights.summary}</p>
+                  {insights.recurringThemes.length > 0 && (
+                    <div className="topic-tags">
+                      {insights.recurringThemes.map((t) => (
+                        <span className="topic-tag" key={t}>
+                          {t}
+                        </span>
+                      ))}
+                    </div>
+                  )}
                 </div>
               )}
 

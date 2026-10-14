@@ -36,11 +36,23 @@ export interface CommentAnalysis {
 export interface AnalyzeRequestComment {
   id: string;
   text: string;
+  likeCount?: number | null;
+}
+
+/** Análisis escrito por la IA sobre el conjunto de comentarios. */
+export interface AiInsights {
+  summary: string;
+  audienceOpinion: string;
+  positives: string[];
+  negatives: string[];
+  recurringThemes: string[];
+  recommendations: string[];
 }
 
 export interface AnalyzeResponse {
   /** Análisis por commentId. */
   analysis: Record<string, CommentAnalysis>;
   engine: "gemini" | "local";
+  insights?: AiInsights;
   warning?: string;
 }

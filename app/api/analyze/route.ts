@@ -3,6 +3,7 @@ import { ApiError, GoogleGenAI } from "@google/genai";
 import { z } from "zod";
 import { analyzeLocally } from "@/lib/analysis";
 import type {
+  AiInsights,
   AnalyzeRequestComment,
   AnalyzeResponse,
   CommentAnalysis,
@@ -40,8 +41,34 @@ Para cada comentario devolvé:
 
 Devolvé exactamente un resultado por cada comentario recibido, usando su índice "i".`;
 
+const InsightsSchema = z.object({
+  summary: z.string(),
+  audienceOpinion: z.string(),
+  positives: z.array(z.string()),
+  negatives: z.array(z.string()),
+  recurringThemes: z.array(z.string()),
+  recommendations: z.array(z.string()),
+});
+
+const INSIGHTS_PROMPT = `Sos analista de redes sociales. Recibís comentarios de videos de Instagram, cada uno con su sentimiento ya clasificado y sus likes. Escribí en español, claro y concreto, sin inventar datos que no estén en los comentarios.
+
+Devolvé:
+- summary: resumen general de la conversación en 3 o 4 oraciones.
+- audienceOpinion: qué opina la audiencia en general, en 2 oraciones.
+- positives: de 2 a 4 aspectos que la audiencia valora (frases cortas, máximo 25 palabras cada una).
+- negatives: de 0 a 4 críticas o quejas que se repiten (frases cortas). Vacío si no hay críticas.
+- recurringThemes: de 3 a 6 temas recurrentes, de 1 a 4 palabras cada uno.
+- recommendations: de 3 a 4 recomendaciones accionables para quien publica los videos, basadas en los comentarios.`;
+
+const MAX_INSIGHT_COMMENTS = 400;
+
 // JSON Schema que Gemini usa para devolver la respuesta ya estructurada.
-const { $schema: _ignored, ...RESPONSE_JSON_SCHEMA } = z.toJSONSchema(BatchResultSchema) as Record<string, unknown>;
+function jsonSchema(schema: z.ZodType): Record<string, unknown> {
+  const { $schema: _ignored, ...rest } = z.toJSONSchema(schema) as Record<string, unknown>;
+  return rest;
+}
+const RESPONSE_JSON_SCHEMA = jsonSchema(BatchResultSchema);
+const INSIGHTS_JSON_SCHEMA = jsonSchema(InsightsSchema);
 
 /** Traduce el error de Gemini a un motivo entendible para mostrar en la app. */
 function describeGeminiError(err: unknown): string {
@@ -113,6 +140,44 @@ async function classifyBatch(
   return out;
 }
 
+const SENTIMENT_WORD = { positive: "positivo", negative: "negativo", neutral: "neutral" } as const;
+
+/** Pide a Gemini un análisis escrito de la conversación, priorizando los comentarios con más likes. */
+async function generateInsights(
+  ai: GoogleGenAI,
+  comments: AnalyzeRequestComment[],
+  analysis: Record<string, CommentAnalysis>,
+  filters: CustomFilter[]
+): Promise<AiInsights> {
+  const sample = [...comments]
+    .sort((a, b) => (b.likeCount ?? 0) - (a.likeCount ?? 0))
+    .slice(0, MAX_INSIGHT_COMMENTS);
+  const counts = { positive: 0, negative: 0, neutral: 0 };
+  for (const c of comments) {
+    const a = analysis[c.id];
+    if (a) counts[a.sentiment]++;
+  }
+  const lines = sample.map((c) => {
+    const sentiment = analysis[c.id]?.sentiment ?? "neutral";
+    return `[${SENTIMENT_WORD[sentiment]}] (${c.likeCount ?? 0} likes) ${c.text.slice(0, 300)}`;
+  });
+  const themes = filters.length > 0 ? `\nTemas definidos por el usuario: ${filters.map((f) => f.name).join(", ")}.` : "";
+
+  const response = await ai.models.generateContent({
+    model: MODEL,
+    contents: `Total: ${comments.length} comentarios (${counts.positive} positivos, ${counts.negative} negativos, ${counts.neutral} neutrales).${themes}\n\nComentarios (los ${sample.length} con más likes):\n${lines.join("\n")}`,
+    config: {
+      systemInstruction: INSIGHTS_PROMPT,
+      responseMimeType: "application/json",
+      responseJsonSchema: INSIGHTS_JSON_SCHEMA,
+      temperature: 0.3,
+    },
+  });
+  const text = response.text;
+  if (!text) throw new Error("Gemini devolvió una respuesta vacía.");
+  return InsightsSchema.parse(JSON.parse(text));
+}
+
 export async function POST(req: NextRequest) {
   let body: { comments?: unknown; filters?: unknown };
   try {
@@ -124,7 +189,9 @@ export async function POST(req: NextRequest) {
   const comments = Array.isArray(body.comments)
     ? body.comments.filter(
         (c): c is AnalyzeRequestComment =>
-          typeof c?.id === "string" && typeof c?.text === "string"
+          typeof c?.id === "string" &&
+          typeof c?.text === "string" &&
+          (c.likeCount === undefined || c.likeCount === null || typeof c.likeCount === "number")
       )
     : [];
   const filters = Array.isArray(body.filters)
@@ -207,13 +274,29 @@ export async function POST(req: NextRequest) {
 
   await Promise.all(Array.from({ length: Math.min(CONCURRENCY, batches.length) }, worker));
 
+  const warnings: string[] = [];
+  if (failedBatches > 0) {
+    warnings.push(
+      `${failedBatches} de ${batches.length} lotes no pudieron analizarse con IA y se clasificaron con el análisis local. Motivo: ${firstError}`
+    );
+  }
+
+  // Análisis escrito para el reporte (si no hubo un fallo total y queda tiempo).
+  let insights: AiInsights | undefined;
+  if (failedBatches < batches.length && Date.now() + 8_000 < deadline) {
+    try {
+      insights = await generateInsights(ai, comments, analysis, filters);
+    } catch (err) {
+      console.error("Fallo al generar el análisis escrito con Gemini:", err);
+      warnings.push(`No se pudo generar el análisis escrito de la IA. Motivo: ${describeGeminiError(err)}`);
+    }
+  }
+
   const result: AnalyzeResponse = {
     analysis,
     engine: "gemini",
-    warning:
-      failedBatches > 0
-        ? `${failedBatches} de ${batches.length} lotes no pudieron analizarse con IA y se clasificaron con el análisis local. Motivo: ${firstError}`
-        : undefined,
+    insights,
+    warning: warnings.length > 0 ? warnings.join(" ") : undefined,
   };
   return NextResponse.json(result);
 }

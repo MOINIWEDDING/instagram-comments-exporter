@@ -97,7 +97,9 @@ Después de obtener los comentarios aparece el panel **Análisis y filtros**:
 La clasificación usa Gemini de Google (`app/api/analyze/route.ts`, modelo `gemini-flash-lite-latest`
 por defecto; se puede cambiar con `GEMINI_MODEL`) si configurás `GEMINI_API_KEY` (en `.env.local` y en
 las variables de entorno de Vercel). La key se obtiene gratis en https://aistudio.google.com/apikey;
-el plan gratuito tiene límites de pedidos por minuto y por día. Al exportar el PDF, si los comentarios
+el plan gratuito tiene límites de pedidos por minuto y por día. Además de clasificar cada comentario, Gemini
+escribe un análisis de la conversación (resumen, qué opina la audiencia, temas recurrentes, puntos
+fuertes, críticas y recomendaciones) que se incluye en el PDF. Al exportar el PDF, si los comentarios
 todavía no se analizaron, se analizan automáticamente para que el reporte incluya el sentimiento. Sin
 la key, la app usa un análisis local por palabras clave y emojis (`lib/analysis.ts`), gratuito pero
 bastante menos preciso.
