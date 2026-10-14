@@ -94,12 +94,13 @@ Después de obtener los comentarios aparece el panel **Análisis y filtros**:
   sentimiento y temas. El PDF incluye además una página de estadísticas (sentimiento general, por
   video y por tema) y una sección por cada filtro con los comentarios que tratan ese tema.
 
-La clasificación usa ChatGPT (`app/api/analyze/route.ts`, modelo `gpt-5.4-nano` por defecto, el más
-económico; se puede cambiar con `OPENAI_MODEL`) si configurás `OPENAI_API_KEY` (en `.env.local` y en
-las variables de entorno de Vercel). Cada análisis consume créditos de tu cuenta de OpenAI. Al
-exportar el PDF, si los comentarios todavía no se analizaron, se analizan automáticamente para que el
-reporte incluya el sentimiento. Sin la key, la app usa un análisis local por palabras clave y emojis
-(`lib/analysis.ts`), gratuito pero bastante menos preciso.
+La clasificación usa Gemini de Google (`app/api/analyze/route.ts`, modelo `gemini-flash-lite-latest`
+por defecto; se puede cambiar con `GEMINI_MODEL`) si configurás `GEMINI_API_KEY` (en `.env.local` y en
+las variables de entorno de Vercel). La key se obtiene gratis en https://aistudio.google.com/apikey;
+el plan gratuito tiene límites de pedidos por minuto y por día. Al exportar el PDF, si los comentarios
+todavía no se analizaron, se analizan automáticamente para que el reporte incluya el sentimiento. Sin
+la key, la app usa un análisis local por palabras clave y emojis (`lib/analysis.ts`), gratuito pero
+bastante menos preciso.
 
 ## Límites conocidos
 

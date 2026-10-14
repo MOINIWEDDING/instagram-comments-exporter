@@ -570,7 +570,7 @@ export default function Home() {
                 )}
                 {analysisEngine && !analysisStale && !analyzing && (
                   <span className="analysis-hint">
-                    {analysisEngine === "openai" ? "Analizado con IA (ChatGPT)" : "Análisis local por palabras clave"}
+                    {analysisEngine === "gemini" ? "Analizado con IA (Gemini)" : "Análisis local por palabras clave"}
                   </span>
                 )}
               </div>

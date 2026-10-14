@@ -41,6 +41,6 @@ export interface AnalyzeRequestComment {
 export interface AnalyzeResponse {
   /** Análisis por commentId. */
   analysis: Record<string, CommentAnalysis>;
-  engine: "openai" | "local";
+  engine: "gemini" | "local";
   warning?: string;
 }

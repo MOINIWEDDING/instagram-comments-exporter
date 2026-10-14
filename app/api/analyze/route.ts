@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import OpenAI from "openai";
-import { zodTextFormat } from "openai/helpers/zod";
+import { ApiError, GoogleGenAI } from "@google/genai";
 import { z } from "zod";
 import { analyzeLocally } from "@/lib/analysis";
 import type {
@@ -13,12 +12,15 @@ import type {
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
-// Modelo económico de OpenAI; se puede cambiar con OPENAI_MODEL.
-const MODEL = process.env.OPENAI_MODEL || "gpt-5.4-nano";
+// Modelo de Gemini con plan gratuito; el alias apunta siempre al Flash-Lite más reciente.
+// Se puede cambiar con GEMINI_MODEL.
+const MODEL = process.env.GEMINI_MODEL || "gemini-flash-lite-latest";
 const MAX_COMMENTS = 5000;
 const MAX_FILTERS = 10;
-const BATCH_SIZE = 120;
-const CONCURRENCY = 6;
+// Lotes grandes y poca concurrencia para respetar los límites por minuto del plan gratuito.
+const BATCH_SIZE = 200;
+const CONCURRENCY = 2;
+const TIME_BUDGET_MS = 50_000;
 
 const BatchResultSchema = z.object({
   results: z.array(
@@ -38,29 +40,40 @@ Para cada comentario devolvé:
 
 Devolvé exactamente un resultado por cada comentario recibido, usando su índice "i".`;
 
-/** Traduce el error de OpenAI a un motivo entendible para mostrar en la app. */
-function describeOpenAIError(err: unknown): string {
-  if (err instanceof OpenAI.APIError) {
-    if (err.status === 401) return "La OPENAI_API_KEY no es válida: revisá que esté bien copiada.";
-    if (err.status === 429 && err.code === "insufficient_quota") {
-      return "Tu cuenta de OpenAI no tiene saldo: cargalo en platform.openai.com/settings/organization/billing.";
+// JSON Schema que Gemini usa para devolver la respuesta ya estructurada.
+const { $schema: _ignored, ...RESPONSE_JSON_SCHEMA } = z.toJSONSchema(BatchResultSchema) as Record<string, unknown>;
+
+/** Traduce el error de Gemini a un motivo entendible para mostrar en la app. */
+function describeGeminiError(err: unknown): string {
+  if (err instanceof ApiError) {
+    if (err.status === 400 && /api key/i.test(err.message)) {
+      return "La GEMINI_API_KEY no es válida: revisá que esté bien copiada.";
     }
-    if (err.status === 429) return "OpenAI limitó la cantidad de pedidos (rate limit): esperá un momento y volvé a intentar.";
-    if (err.status === 404 || err.code === "model_not_found") {
-      return `Tu cuenta de OpenAI no tiene acceso al modelo "${MODEL}": probá con OPENAI_MODEL=gpt-4o-mini.`;
+    if (err.status === 403) return "La GEMINI_API_KEY no tiene permiso para usar la API de Gemini.";
+    if (err.status === 429) {
+      return "Se alcanzó el límite gratuito de Gemini (pedidos por minuto o por día): esperá un rato y volvé a analizar.";
     }
-    return `OpenAI respondió con error ${err.status ?? ""}: ${err.message}`;
+    if (err.status === 404) {
+      return `El modelo "${MODEL}" no está disponible: probá con GEMINI_MODEL=gemini-flash-latest.`;
+    }
+    return `Gemini respondió con error ${err.status}: ${err.message}`;
   }
-  if (err instanceof OpenAI.APIConnectionError) return "No se pudo conectar con OpenAI.";
   return err instanceof Error ? err.message : "Error desconocido.";
 }
 
-function hasOpenAICredentials(): boolean {
-  return Boolean(process.env.OPENAI_API_KEY);
+/** Segundos que Gemini pide esperar tras un 429 (viene como "retryDelay": "23s"). */
+function retryDelayMs(err: unknown): number | null {
+  if (!(err instanceof ApiError) || err.status !== 429) return null;
+  const match = err.message.match(/retryDelay"?\s*:\s*"(\d+(?:\.\d+)?)s"/);
+  return match ? Math.ceil(Number(match[1]) * 1000) : 10_000;
+}
+
+function hasGeminiCredentials(): boolean {
+  return Boolean(process.env.GEMINI_API_KEY);
 }
 
 async function classifyBatch(
-  client: OpenAI,
+  ai: GoogleGenAI,
   batch: AnalyzeRequestComment[],
   filters: CustomFilter[]
 ): Promise<Record<string, CommentAnalysis>> {
@@ -71,17 +84,20 @@ async function classifyBatch(
       : "(sin filtros temáticos: devolvé filters vacío)";
   const commentsText = batch.map((c, i) => JSON.stringify({ i, text: c.text })).join("\n");
 
-  const response = await client.responses.parse({
+  const response = await ai.models.generateContent({
     model: MODEL,
-    // Los modelos de razonamiento (gpt-5*, o*) aceptan un esfuerzo bajo para clasificar rápido y barato.
-    ...(/^(gpt-5|o\d)/.test(MODEL) ? { reasoning: { effort: "low" as const } } : {}),
-    instructions: SYSTEM_PROMPT,
-    input: `Filtros temáticos:\n${filtersText}\n\nComentarios (uno por línea, JSON):\n${commentsText}`,
-    text: { format: zodTextFormat(BatchResultSchema, "clasificacion_comentarios") },
+    contents: `Filtros temáticos:\n${filtersText}\n\nComentarios (uno por línea, JSON):\n${commentsText}`,
+    config: {
+      systemInstruction: SYSTEM_PROMPT,
+      responseMimeType: "application/json",
+      responseJsonSchema: RESPONSE_JSON_SCHEMA,
+      temperature: 0,
+    },
   });
 
-  const parsed = response.output_parsed;
-  if (!parsed) throw new Error("Respuesta del modelo sin formato válido.");
+  const text = response.text;
+  if (!text) throw new Error("Gemini devolvió una respuesta vacía.");
+  const parsed = BatchResultSchema.parse(JSON.parse(text));
 
   const out: Record<string, CommentAnalysis> = {};
   for (const r of parsed.results) {
@@ -133,17 +149,22 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: `Máximo ${MAX_FILTERS} filtros.` }, { status: 400 });
   }
 
-  if (!hasOpenAICredentials()) {
+  if (!hasGeminiCredentials()) {
     const result: AnalyzeResponse = {
       analysis: analyzeLocally(comments, filters),
       engine: "local",
       warning:
-        "No hay OPENAI_API_KEY configurada: se usó un análisis local por palabras clave, mucho menos preciso. Configurala para clasificar con ChatGPT.",
+        "No hay GEMINI_API_KEY configurada: se usó un análisis local por palabras clave, mucho menos preciso. Configurala para clasificar con Gemini.",
     };
     return NextResponse.json(result);
   }
 
-  const client = new OpenAI();
+  const ai = new GoogleGenAI({
+    apiKey: process.env.GEMINI_API_KEY,
+    // Opcional: pasar por un proxy propio.
+    httpOptions: process.env.GEMINI_BASE_URL ? { baseUrl: process.env.GEMINI_BASE_URL } : undefined,
+  });
+  const deadline = Date.now() + TIME_BUDGET_MS;
   const batches: AnalyzeRequestComment[][] = [];
   for (let i = 0; i < comments.length; i += BATCH_SIZE) {
     batches.push(comments.slice(i, i + BATCH_SIZE));
@@ -158,11 +179,25 @@ export async function POST(req: NextRequest) {
     while (next < batches.length) {
       const batch = batches[next++];
       try {
-        Object.assign(analysis, await classifyBatch(client, batch, filters));
+        Object.assign(analysis, await classifyBatch(ai, batch, filters));
       } catch (err) {
-        failedBatches++;
-        firstError ??= describeOpenAIError(err);
-        console.error("Fallo al clasificar lote con OpenAI:", err);
+        // Con el plan gratuito, un 429 suele resolverse esperando lo que pide Gemini: un reintento.
+        const wait = retryDelayMs(err);
+        let retried = false;
+        if (wait !== null && Date.now() + wait + 5_000 < deadline) {
+          await new Promise((resolve) => setTimeout(resolve, wait));
+          try {
+            Object.assign(analysis, await classifyBatch(ai, batch, filters));
+            retried = true;
+          } catch (retryErr) {
+            err = retryErr;
+          }
+        }
+        if (!retried) {
+          failedBatches++;
+          firstError ??= describeGeminiError(err);
+          console.error("Fallo al clasificar lote con Gemini:", err);
+        }
       }
       // Lo que el modelo no devolvió (lote fallido o índices faltantes) se completa localmente.
       const missing = batch.filter((c) => !analysis[c.id]);
@@ -174,7 +209,7 @@ export async function POST(req: NextRequest) {
 
   const result: AnalyzeResponse = {
     analysis,
-    engine: "openai",
+    engine: "gemini",
     warning:
       failedBatches > 0
         ? `${failedBatches} de ${batches.length} lotes no pudieron analizarse con IA y se clasificaron con el análisis local. Motivo: ${firstError}`
