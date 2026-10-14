@@ -180,10 +180,6 @@ export default function Home() {
     () => results.reduce((sum, r) => sum + r.comments.length, 0),
     [results]
   );
-  const totalReplies = useMemo(
-    () => results.reduce((sum, r) => sum + r.comments.filter((c) => c.parentCommentId).length, 0),
-    [results]
-  );
   const okCount = results.filter((r) => r.ok).length;
   const errorCount = results.filter((r) => !r.ok).length;
 
@@ -270,8 +266,8 @@ export default function Home() {
     if (topicFilter === id) setTopicFilter("all");
   }
 
-  async function handleAnalyze() {
-    if (allComments.length === 0) return;
+  async function handleAnalyze(): Promise<Record<string, CommentAnalysis> | null> {
+    if (allComments.length === 0) return null;
     setAnalyzing(true);
     setAnalysisError(null);
     try {
@@ -286,7 +282,7 @@ export default function Home() {
       const data = await res.json();
       if (!res.ok) {
         setAnalysisError(data.error ?? "Error al analizar los comentarios.");
-        return;
+        return null;
       }
       const response = data as AnalyzeResponse;
       setAnalysis(response.analysis);
@@ -294,8 +290,10 @@ export default function Home() {
       setAnalysisWarning(response.warning ?? null);
       setAnalyzedFilters(filters);
       if (topicFilter !== "all" && !filters.some((f) => f.id === topicFilter)) setTopicFilter("all");
+      return response.analysis;
     } catch (err) {
       setAnalysisError(err instanceof Error ? err.message : "Error de red.");
+      return null;
     } finally {
       setAnalyzing(false);
     }
@@ -343,6 +341,20 @@ export default function Home() {
   async function handlePdfExport() {
     setPdfLoading(true);
     try {
+      // El reporte siempre lleva el análisis de sentimiento: si falta o quedó desactualizado,
+      // se analiza antes de generar el PDF.
+      if (!analysis || analysisStale) {
+        const fresh = await handleAnalyze();
+        if (fresh) {
+          await downloadPdf({
+            ...exportInput,
+            results: analysis ? filteredResults : results,
+            analysis: fresh,
+            filters,
+          });
+          return;
+        }
+      }
       await downloadPdf(exportInput);
     } finally {
       setPdfLoading(false);
@@ -414,7 +426,7 @@ export default function Home() {
             onClick={handlePdfExport}
           >
             {pdfLoading ? <span className="spinner spinner-dark" /> : <IconFileText />}
-            {pdfLoading ? "Generando PDF…" : "Exportar PDF"}
+            {pdfLoading ? (analyzing ? "Analizando comentarios…" : "Generando PDF…") : "Exportar PDF"}
           </button>
         </div>
         {requestError && (
@@ -455,10 +467,6 @@ export default function Home() {
             <div className="stat">
               <div className="value">{totalComments}</div>
               <div className="label">Comentarios totales</div>
-            </div>
-            <div className="stat">
-              <div className="value">{totalReplies}</div>
-              <div className="label">Son respuestas</div>
             </div>
           </div>
 
@@ -562,7 +570,7 @@ export default function Home() {
                 )}
                 {analysisEngine && !analysisStale && !analyzing && (
                   <span className="analysis-hint">
-                    {analysisEngine === "claude" ? "Analizado con IA (Claude)" : "Análisis local por palabras clave"}
+                    {analysisEngine === "openai" ? "Analizado con IA (ChatGPT)" : "Análisis local por palabras clave"}
                   </span>
                 )}
               </div>

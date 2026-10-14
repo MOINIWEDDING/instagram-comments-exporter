@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import Anthropic from "@anthropic-ai/sdk";
-import { betaZodOutputFormat } from "@anthropic-ai/sdk/helpers/beta/zod";
+import OpenAI from "openai";
+import { zodTextFormat } from "openai/helpers/zod";
 import { z } from "zod";
 import { analyzeLocally } from "@/lib/analysis";
 import type {
@@ -13,7 +13,8 @@ import type {
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
-const MODEL = "claude-opus-5-5";
+// Modelo económico de OpenAI; se puede cambiar con OPENAI_MODEL.
+const MODEL = process.env.OPENAI_MODEL || "gpt-5.4-nano";
 const MAX_COMMENTS = 5000;
 const MAX_FILTERS = 10;
 const BATCH_SIZE = 120;
@@ -37,12 +38,12 @@ Para cada comentario devolvé:
 
 Devolvé exactamente un resultado por cada comentario recibido, usando su índice "i".`;
 
-function hasClaudeCredentials(): boolean {
-  return Boolean(process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN);
+function hasOpenAICredentials(): boolean {
+  return Boolean(process.env.OPENAI_API_KEY);
 }
 
 async function classifyBatch(
-  client: Anthropic,
+  client: OpenAI,
   batch: AnalyzeRequestComment[],
   filters: CustomFilter[]
 ): Promise<Record<string, CommentAnalysis>> {
@@ -53,25 +54,16 @@ async function classifyBatch(
       : "(sin filtros temáticos: devolvé filters vacío)";
   const commentsText = batch.map((c, i) => JSON.stringify({ i, text: c.text })).join("\n");
 
-  const response = await client.beta.messages.parse({
+  const response = await client.responses.parse({
     model: MODEL,
-    max_tokens: 16000,
-    betas: ["server-side-fallback-2026-07-01"],
-    fallbacks: "default",
-    output_config: { effort: "low", format: betaZodOutputFormat(BatchResultSchema) },
-    system: SYSTEM_PROMPT,
-    messages: [
-      {
-        role: "user",
-        content: `Filtros temáticos:\n${filtersText}\n\nComentarios (uno por línea, JSON):\n${commentsText}`,
-      },
-    ],
+    // Los modelos de razonamiento (gpt-5*, o*) aceptan un esfuerzo bajo para clasificar rápido y barato.
+    ...(/^(gpt-5|o\d)/.test(MODEL) ? { reasoning: { effort: "low" as const } } : {}),
+    instructions: SYSTEM_PROMPT,
+    input: `Filtros temáticos:\n${filtersText}\n\nComentarios (uno por línea, JSON):\n${commentsText}`,
+    text: { format: zodTextFormat(BatchResultSchema, "clasificacion_comentarios") },
   });
 
-  if (response.stop_reason === "refusal") {
-    throw new Error("El modelo rechazó clasificar este lote.");
-  }
-  const parsed = response.parsed_output;
+  const parsed = response.output_parsed;
   if (!parsed) throw new Error("Respuesta del modelo sin formato válido.");
 
   const out: Record<string, CommentAnalysis> = {};
@@ -124,17 +116,17 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: `Máximo ${MAX_FILTERS} filtros.` }, { status: 400 });
   }
 
-  if (!hasClaudeCredentials()) {
+  if (!hasOpenAICredentials()) {
     const result: AnalyzeResponse = {
       analysis: analyzeLocally(comments, filters),
       engine: "local",
       warning:
-        "No hay ANTHROPIC_API_KEY configurada: se usó un análisis local por palabras clave, mucho menos preciso. Configurala para clasificar con IA.",
+        "No hay OPENAI_API_KEY configurada: se usó un análisis local por palabras clave, mucho menos preciso. Configurala para clasificar con ChatGPT.",
     };
     return NextResponse.json(result);
   }
 
-  const client = new Anthropic();
+  const client = new OpenAI();
   const batches: AnalyzeRequestComment[][] = [];
   for (let i = 0; i < comments.length; i += BATCH_SIZE) {
     batches.push(comments.slice(i, i + BATCH_SIZE));
@@ -151,7 +143,7 @@ export async function POST(req: NextRequest) {
         Object.assign(analysis, await classifyBatch(client, batch, filters));
       } catch (err) {
         failedBatches++;
-        console.error("Fallo al clasificar lote con Claude:", err);
+        console.error("Fallo al clasificar lote con OpenAI:", err);
       }
       // Lo que el modelo no devolvió (lote fallido o índices faltantes) se completa localmente.
       const missing = batch.filter((c) => !analysis[c.id]);
@@ -163,7 +155,7 @@ export async function POST(req: NextRequest) {
 
   const result: AnalyzeResponse = {
     analysis,
-    engine: "claude",
+    engine: "openai",
     warning:
       failedBatches > 0
         ? `${failedBatches} de ${batches.length} lotes no pudieron analizarse con IA y se clasificaron con el análisis local.`

@@ -92,7 +92,7 @@ function mix(a: Rgb, b: Rgb, t: number): Rgb {
   return [0, 1, 2].map((i) => Math.round(a[i] + (b[i] - a[i]) * t)) as Rgb;
 }
 
-type IconKind = "bubble" | "heart" | "user" | "reply" | "spark" | "question" | "calendar";
+type IconKind = "bubble" | "heart" | "user" | "spark" | "calendar";
 
 export async function renderPdfReport(input: ExportInput) {
   const [{ default: JsPDF, GState }, { default: autoTable }] = await Promise.all([
@@ -217,17 +217,6 @@ export async function renderPdfReport(input: ExportInput) {
       case "user":
         doc.circle(cx, cy - 2.6, 2.8, "F");
         doc.roundedRect(cx - 5.2, cy + 1.4, 10.4, 4.8, 2.4, 2.4, "F");
-        break;
-      case "reply":
-        doc.line(cx + 5, cy + 4.5, cx + 5, cy + 1);
-        doc.line(cx + 5, cy + 1, cx - 4.5, cy + 1);
-        doc.line(cx - 4.5, cy + 1, cx - 1, cy - 2.5);
-        doc.line(cx - 4.5, cy + 1, cx - 1, cy + 4.5);
-        break;
-      case "question":
-        font(11, "bold");
-        color(c);
-        doc.text("?", cx, cy + 4, { align: "center" });
         break;
       case "calendar":
         doc.roundedRect(cx - 5.5, cy - 4.5, 11, 10, 2, 2, "S");
@@ -514,7 +503,7 @@ export async function renderPdfReport(input: ExportInput) {
       label: "Comentarios",
       value: formatNumber(stats.totalComments),
       trend: [`${stats.videos.length} ${stats.videos.length === 1 ? "video" : "videos"}`, "neutral"],
-      note: `${stats.topLevel} principales y ${stats.replies} respuestas.`,
+      note: "Comentarios obtenidos de los videos.",
     },
     {
       icon: "heart",
@@ -531,19 +520,27 @@ export async function renderPdfReport(input: ExportInput) {
       note: "Cuentas distintas que comentaron.",
     },
     {
-      icon: "reply",
-      label: "Respuestas",
-      value: formatNumber(stats.replies),
-      trend: [`${percent(stats.replies, stats.totalComments)} del total`, stats.replyRate >= 0.15 ? "positive" : "neutral"],
-      note: "Comentarios que responden a otro comentario.",
+      icon: "heart",
+      label: "Comentario más apoyado",
+      value: formatNumber(stats.maxLikes),
+      trend: ["likes", stats.maxLikes > 0 ? "positive" : "neutral"],
+      note: stats.topComments[0] ? `De @${clean(stats.topComments[0].comment.username)}.` : "Sin comentarios con likes.",
     },
-    {
-      icon: "question",
-      label: "Preguntas sin respuesta",
-      value: String(stats.unansweredQuestions),
-      trend: [stats.unansweredQuestions > 0 ? "a responder" : "al día", stats.unansweredQuestions > 0 ? "negative" : "positive"],
-      note: "Comentarios con \"?\" que nadie respondió.",
-    },
+    stats.sentiment && stats.sentiment.total > 0
+      ? {
+          icon: "spark",
+          label: "Comentarios negativos",
+          value: formatNumber(stats.sentiment.negative),
+          trend: [`${percent(stats.sentiment.negative, stats.sentiment.total)} del total`, stats.sentiment.negative > 0 ? "negative" : "positive"],
+          note: "Críticas, quejas o burlas detectadas.",
+        }
+      : {
+          icon: "user",
+          label: "Comentarios por persona",
+          value: stats.commentsPerPerson.toFixed(1).replace(".", ","),
+          trend: ["promedio", "neutral"],
+          note: "Cuántas veces comenta cada cuenta.",
+        },
   ];
   const highlight =
     stats.sentiment && stats.netSentiment !== null
@@ -663,7 +660,6 @@ export async function renderPdfReport(input: ExportInput) {
     // Tabla en tarjetas
     const cols: { label: string; value: (v: (typeof stats.videos)[number]) => string }[] = [
       { label: "Comentarios", value: (v) => formatNumber(v.comments) },
-      { label: "Respuestas", value: (v) => formatNumber(v.replies) },
       { label: "Likes", value: (v) => formatNumber(v.likes) },
       { label: "Personas", value: (v) => formatNumber(v.uniqueUsers) },
     ];
@@ -706,7 +702,7 @@ export async function renderPdfReport(input: ExportInput) {
     });
     y += 14;
 
-    // Sentimiento por video (o respuestas y personas sin análisis)
+    // Sentimiento por video (o likes sin análisis)
     const series = analysis
       ? (["positive", "neutral", "negative"] as Sentiment[]).map((k) => ({
           name: SENTIMENT_PLURAL[k],
@@ -714,12 +710,11 @@ export async function renderPdfReport(input: ExportInput) {
           values: chartVideos.map((v) => v.sentiment?.[k] ?? 0),
         }))
       : [
-          { name: "Respuestas", colors: [BLUE, CYAN] as [Rgb, Rgb], values: chartVideos.map((v) => v.replies) },
-          { name: "Personas", colors: [[160, 168, 236], [214, 219, 250]] as [Rgb, Rgb], values: chartVideos.map((v) => v.uniqueUsers) },
+          { name: "Likes", colors: [BLUE, CYAN] as [Rgb, Rgb], values: chartVideos.map((v) => v.likes) },
         ];
     need(300);
     card(M, y, CW, 280);
-    cardTitle(analysis ? "Sentimiento por video" : "Respuestas y personas por video", M + 20, y + 34, analysis ? "spark" : "reply");
+    cardTitle(analysis ? "Sentimiento por video" : "Likes por video", M + 20, y + 34, analysis ? "spark" : "heart");
     legend(series.map((s) => ({ name: s.name, color: s.colors[0] })), W - M - 20, y + 32);
     barChart(M + 20, y + 62, CW - 40, 200, chartVideos.map((v) => `Video ${v.index + 1}`), series);
     y += 300;
@@ -805,14 +800,14 @@ export async function renderPdfReport(input: ExportInput) {
     doc.text(userLabel(first.comment), rx, y + 34);
     font(9);
     color(MUTED);
-    doc.text(`Video #${first.videoIndex + 1} · ${formatDate(first.comment.timestamp)}`, W - M - 20, y + 34, { align: "right" });
+    doc.text(`Video #${first.videoIndex + 1}`, W - M - 20, y + 34, { align: "right" });
     font(13, "italic");
     color(TEXT);
     paragraph(cleanComment(first.comment.text), rx, y + 62, rw, 18, 4);
     const sentimentOf = analysis?.[first.comment.commentId]?.sentiment;
     const mets: [string, string, IconKind][] = [
       [formatNumber(first.comment.likeCount ?? 0), "Likes", "heart"],
-      [String(first.replies), "Respuestas", "reply"],
+      [first.comment.timestamp ? shortDate(new Date(first.comment.timestamp * 1000)) : "—", "Fecha", "calendar"],
       [sentimentOf ? SENTIMENT_LABELS[sentimentOf] : "—", "Sentimiento", "spark"],
     ];
     const mw = (rw - 20) / 3;
@@ -1012,10 +1007,6 @@ export async function renderPdfReport(input: ExportInput) {
   };
   const styleCells = (sentimentColumn: number | null) => (data: CellData) => {
     if (data.section !== "body") return;
-    if (data.column.index === 0 && typeof data.cell.raw === "string" && data.cell.raw.startsWith("»")) {
-      data.cell.styles.textColor = MUTED;
-      data.cell.styles.fontStyle = "italic";
-    }
     if (sentimentColumn !== null && data.column.index === sentimentColumn) {
       const entry = (Object.entries(SENTIMENT_LABELS) as [Sentiment, string][]).find(([, l]) => l === data.cell.raw);
       if (entry) {
@@ -1033,7 +1024,7 @@ export async function renderPdfReport(input: ExportInput) {
       for (const c of r.comments) {
         const a = analysis?.[c.commentId];
         if (!a?.filterIds.includes(f.id)) continue;
-        rows.push([`${c.parentCommentId ? "» " : ""}@${clean(c.username)}`, cleanComment(c.text), `#${videoIndex + 1}`, SENTIMENT_LABELS[a.sentiment]]);
+        rows.push([`@${clean(c.username)}`, cleanComment(c.text), `#${videoIndex + 1}`, SENTIMENT_LABELS[a.sentiment]]);
       }
     });
     if (rows.length === 0) continue;
@@ -1064,7 +1055,7 @@ export async function renderPdfReport(input: ExportInput) {
     if (withTopics) head.push("Temas");
     const body = result.comments.map((c) => {
       const row = [
-        `${c.parentCommentId ? "» " : ""}@${clean(c.username)}`,
+        `@${clean(c.username)}`,
         cleanComment(c.text),
         formatDate(c.timestamp),
         c.likeCount != null ? String(c.likeCount) : "—",

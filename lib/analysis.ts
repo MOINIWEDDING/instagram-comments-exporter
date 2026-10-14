@@ -8,7 +8,7 @@ import type {
 
 // Análisis local (sin IA): léxico simple en español/inglés + emojis para el sentimiento y
 // coincidencia de palabras clave para los filtros personalizados. Es el respaldo cuando no hay
-// ANTHROPIC_API_KEY configurada; es mucho menos preciso que el análisis con Claude.
+// OPENAI_API_KEY configurada; es mucho menos preciso que el análisis con ChatGPT.
 
 export function normalize(text: string): string {
   return text

@@ -9,7 +9,6 @@ export interface VideoStats {
   url: string;
   shortcode: string;
   comments: number;
-  replies: number;
   likes: number;
   uniqueUsers: number;
   sentiment: SentimentStats | null;
@@ -31,22 +30,21 @@ export interface DayStats {
 export interface ReportStats {
   videos: VideoStats[];
   totalComments: number;
-  topLevel: number;
-  replies: number;
   totalLikes: number;
   avgLikes: number;
   uniqueUsers: number;
   repeatUsers: number;
-  replyRate: number;
+  /** Likes del comentario más apoyado. */
+  maxLikes: number;
+  commentsPerPerson: number;
   sentiment: SentimentStats | null;
   /** % positivos - % negativos, de -100 a 100. */
   netSentiment: number | null;
   topics: TopicStats[];
-  topComments: { comment: CommentItem; replies: number; videoIndex: number }[];
+  topComments: { comment: CommentItem; videoIndex: number }[];
   topUsers: { username: string; count: number; likes: number }[];
   days: DayStats[];
   peakDays: DayStats[];
-  unansweredQuestions: number;
   strengths: string[];
   attention: string[];
   takeaways: string[];
@@ -74,13 +72,6 @@ export function computeReportStats(
   const withVideo = results.flatMap((r, videoIndex) => r.comments.map((c) => ({ c, videoIndex })));
   const all = withVideo.map((x) => x.c);
 
-  const repliesByParent = new Map<string, number>();
-  for (const c of all) {
-    if (c.parentCommentId) {
-      repliesByParent.set(c.parentCommentId, (repliesByParent.get(c.parentCommentId) ?? 0) + 1);
-    }
-  }
-
   const userCounts = new Map<string, { count: number; likes: number }>();
   for (const c of all) {
     const u = userCounts.get(c.username) ?? { count: 0, likes: 0 };
@@ -95,7 +86,6 @@ export function computeReportStats(
       url: r.url,
       shortcode: r.shortcode ?? `video-${index + 1}`,
       comments: r.comments.length,
-      replies: r.comments.filter((c) => c.parentCommentId).length,
       likes: r.comments.reduce((s, c) => s + (c.likeCount ?? 0), 0),
       uniqueUsers: new Set(r.comments.map((c) => c.username)).size,
       sentiment: analysis ? sentimentStats(r.comments, analysis) : null,
@@ -103,7 +93,6 @@ export function computeReportStats(
     .filter((v) => v.comments > 0);
 
   const totalComments = all.length;
-  const replies = all.filter((c) => c.parentCommentId).length;
   const totalLikes = all.reduce((s, c) => s + (c.likeCount ?? 0), 0);
   const sentiment = analysis ? sentimentStats(all, analysis) : null;
   const netSentiment =
@@ -125,7 +114,7 @@ export function computeReportStats(
   const topComments = [...withVideo]
     .sort((a, b) => (b.c.likeCount ?? 0) - (a.c.likeCount ?? 0))
     .slice(0, 3)
-    .map(({ c, videoIndex }) => ({ comment: c, replies: repliesByParent.get(c.commentId) ?? 0, videoIndex }));
+    .map(({ c, videoIndex }) => ({ comment: c, videoIndex }));
 
   const topUsers = [...userCounts.entries()]
     .map(([username, v]) => ({ username, ...v }))
@@ -144,12 +133,9 @@ export function computeReportStats(
   const days = [...dayMap.values()].sort((a, b) => a.date.getTime() - b.date.getTime());
   const peakDays = [...days].sort((a, b) => b.count - a.count).slice(0, 4).sort((a, b) => a.date.getTime() - b.date.getTime());
 
-  const unansweredQuestions = all.filter(
-    (c) => !c.parentCommentId && c.text.includes("?") && !repliesByParent.has(c.commentId)
-  ).length;
-
   const repeatUsers = [...userCounts.values()].filter((u) => u.count > 1).length;
-  const replyRate = ratio(replies, totalComments);
+  const maxLikes = topComments[0]?.comment.likeCount ?? 0;
+  const avgLikes = ratio(totalLikes, totalComments);
 
   // Textos automáticos
   const takeaways: string[] = [];
@@ -171,7 +157,7 @@ export function computeReportStats(
     );
   }
   takeaways.push(
-    `${percent(replies, totalComments)} de los comentarios son respuestas: ${replyRate >= 0.15 ? "la audiencia conversa entre sí" : "la mayoría comenta sin generar hilo"}.`
+    `Cada comentario recibe en promedio ${avgLikes.toFixed(1).replace(".", ",")} likes; el más apoyado llega a ${formatNumber(maxLikes)}.`
   );
   const topTopic = topics.find((t) => t.count > 0);
   if (topTopic) {
@@ -196,16 +182,13 @@ export function computeReportStats(
       `"${bestTopic.filter.name}" es el tema mejor recibido: ${percent(bestTopic.sentiment.positive, bestTopic.count)} de sus comentarios son positivos.`
     );
   }
-  if (replyRate >= 0.15) {
-    strengths.push(`Hay conversación activa: ${percent(replies, totalComments)} de los comentarios son respuestas.`);
-  }
   if (repeatUsers > 0) {
     strengths.push(`${repeatUsers} personas volvieron a comentar: es una comunidad que se involucra.`);
   }
 
-  if (unansweredQuestions > 0) {
+  if (sentiment && sentiment.total > 0 && sentiment.negative > sentiment.positive) {
     attention.push(
-      `${unansweredQuestions} ${unansweredQuestions === 1 ? "pregunta quedó" : "preguntas quedaron"} sin respuesta en los comentarios: responderlas mejora la conversación.`
+      `Hay más críticas que elogios: ${percent(sentiment.negative, sentiment.total)} negativos frente a ${percent(sentiment.positive, sentiment.total)} positivos.`
     );
   }
   if (sentiment && sentiment.negative > 0) {
@@ -221,20 +204,26 @@ export function computeReportStats(
       `"${worstTopic.filter.name}" acumula más críticas (${worstTopic.sentiment.negative} negativos): conviene darle una respuesta específica.`
     );
   }
-  if (replyRate < 0.15) {
-    attention.push(`Pocos comentarios generan hilo (${percent(replies, totalComments)} son respuestas): invitar a la conversación puede ayudar.`);
+  const topNegative = analysis
+    ? [...all]
+        .filter((c) => analysis[c.commentId]?.sentiment === "negative")
+        .sort((a, b) => (b.likeCount ?? 0) - (a.likeCount ?? 0))[0]
+    : undefined;
+  if (topNegative && (topNegative.likeCount ?? 0) > 0) {
+    attention.push(
+      `La crítica más apoyada (@${topNegative.username}) suma ${formatNumber(topNegative.likeCount ?? 0)} likes: otras personas comparten esa opinión.`
+    );
   }
 
   return {
     videos,
     totalComments,
-    topLevel: totalComments - replies,
-    replies,
     totalLikes,
-    avgLikes: ratio(totalLikes, totalComments),
+    avgLikes,
     uniqueUsers: userCounts.size,
     repeatUsers,
-    replyRate,
+    maxLikes,
+    commentsPerPerson: ratio(totalComments, userCounts.size),
     sentiment,
     netSentiment,
     topics,
@@ -242,7 +231,6 @@ export function computeReportStats(
     topUsers,
     days,
     peakDays,
-    unansweredQuestions,
     strengths: strengths.slice(0, 3),
     attention: attention.slice(0, 3),
     takeaways: takeaways.slice(0, 4),
