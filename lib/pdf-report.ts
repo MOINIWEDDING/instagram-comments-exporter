@@ -14,6 +14,7 @@ const M = 40;
 const CW = W - M * 2;
 const TOP = 104;
 const BOTTOM = H - 64;
+const PREPARED_BY = "Preparado con Comment Export by Moises Fermin";
 
 const PAGE: Rgb = [241, 243, 252];
 const CARD: Rgb = [255, 255, 255];
@@ -134,7 +135,7 @@ export async function renderPdfReport(input: ExportInput) {
     r: number,
     from: Rgb,
     to: Rgb,
-    direction: "horizontal" | "vertical" | "diagonal" = "diagonal"
+    direction: "horizontal" | "vertical" = "horizontal"
   ) {
     if (w <= 0 || h <= 0) return;
     doc.saveGraphicsState();
@@ -146,15 +147,7 @@ export async function renderPdfReport(input: ExportInput) {
     for (let i = 0; i < steps; i++) {
       fill(mix(from, to, i / (steps - 1)));
       if (direction === "vertical") doc.rect(x, gy + (h * i) / steps, w, h / steps + 1, "F");
-      else if (direction === "horizontal") doc.rect(x + (w * i) / steps, gy, w / steps + 1, h, "F");
-      else {
-        // Diagonal: franjas inclinadas que cubren el rectángulo.
-        const span = w + h;
-        const x0 = x - h + (span * i) / steps;
-        const x1 = x0 + span / steps + 1;
-        doc.triangle(x0, gy + h, x1, gy + h, x1 + h, gy, "F");
-        doc.triangle(x0, gy + h, x0 + h, gy, x1 + h, gy, "F");
-      }
+      else doc.rect(x + (w * i) / steps, gy, w / steps + 1, h, "F");
     }
     doc.restoreGraphicsState();
   }
@@ -293,8 +286,8 @@ export async function renderPdfReport(input: ExportInput) {
     doc.text("Comment Export", x + 30, ly + 15);
   }
 
-  function startPage() {
-    doc.addPage([W, H], "portrait");
+  function startPage(first = false) {
+    if (!first) doc.addPage([W, H], "portrait");
     fill(PAGE);
     doc.rect(0, 0, W, H, "F");
     withOpacity(0.5, () => gradient(W - 260, -160, 420, 320, 160, BLUE_SOFT, PAGE));
@@ -309,8 +302,7 @@ export async function renderPdfReport(input: ExportInput) {
     if (y + h > BOTTOM) startPage();
   }
 
-  /** Título en dos tonos, como "Resumen general" con la segunda parte en azul. */
-  /** `next` es el alto del primer bloque que sigue, para no dejar el título solo al pie. */
+  /** Título en dos tonos, con la segunda parte en azul. `next` es el alto del primer bloque que sigue, para no dejar el título solo al pie. */
   function heading(main: string, accent: string, subtitle?: string, next = 120) {
     need((subtitle ? 90 : 70) + next);
     font(26, "bold");
@@ -447,85 +439,73 @@ export async function renderPdfReport(input: ExportInput) {
 
   const userLabel = (c: CommentItem) => `@${clean(c.username)}`;
 
-  // ——— Portada ———
+  // ——— Encabezado de la primera página ———
 
-  gradient(0, 0, W, H, 0, [72, 84, 226], [86, 206, 232], "diagonal");
-  withOpacity(0.1, () => {
-    fill(WHITE);
-    doc.circle(W - 90, 260, 230, "F");
-    doc.circle(W - 40, 860, 160, "F");
-    doc.circle(80, 1040, 120, "F");
-  });
-  // Ilustración: monitor con una burbuja de comentario, en líneas finas.
-  withOpacity(0.32, () => {
-    stroke(WHITE, 2);
-    doc.roundedRect(430, 440, 300, 200, 16, 16, "S");
-    doc.line(560, 640, 550, 690);
-    doc.line(600, 640, 610, 690);
-    doc.line(520, 690, 640, 690);
-    doc.roundedRect(470, 480, 130, 80, 14, 14, "S");
-    doc.line(500, 560, 492, 584);
-    doc.line(492, 584, 520, 560);
-    doc.line(620, 500, 700, 500);
-    doc.line(620, 520, 690, 520);
-    doc.line(620, 540, 670, 540);
-    for (let i = 0; i < 6; i++) doc.roundedRect(474 + i * 38, 600 - i * 6 - 10, 20, 20 + i * 6, 4, 4, "S");
-  });
-  logo(M + 8, 60, true);
-  font(54, "bold");
-  color(WHITE);
-  doc.text("Reporte de", M + 8, 300);
-  doc.text("comentarios", M + 8, 360);
-  font(14);
-  withOpacity(0.85, () => {
-    color(WHITE);
-    paragraph(
-      `Análisis de la conversación en ${stats.videos.length} ${stats.videos.length === 1 ? "video" : "videos"} de Instagram: sentimiento, temas, actividad y comentarios destacados.`,
-      M + 8,
-      398,
-      340,
-      20
-    );
-  });
-
-  // Tarjetas "de vidrio" con los números principales
-  const coverStats: [string, string][] = [
-    [formatNumber(stats.totalComments), "Comentarios"],
-    [formatNumber(stats.uniqueUsers), "Personas"],
-    [stats.sentiment && stats.sentiment.total > 0 ? percent(stats.sentiment.positive, stats.sentiment.total) : formatNumber(stats.totalLikes), stats.sentiment ? "Positivos" : "Likes"],
-  ];
-  coverStats.forEach(([value, label], i) => {
-    const gx = M + 8 + i * 118;
-    withOpacity(0.18, () => {
+  startPage(true);
+  {
+    const hh = 300;
+    card(M, y, CW, hh, 18);
+    gradient(M, y, CW, hh, 18, [72, 84, 226], [86, 206, 232], "horizontal");
+    doc.saveGraphicsState();
+    doc.roundedRect(M, y, CW, hh, 18, 18, null);
+    doc.clip();
+    doc.discardPath();
+    withOpacity(0.1, () => {
       fill(WHITE);
-      doc.roundedRect(gx, 780, 106, 84, 14, 14, "F");
+      doc.circle(M + CW - 60, y + 40, 150, "F");
+      doc.circle(M + 40, y + hh + 30, 90, "F");
     });
-    font(24, "bold");
+    doc.restoreGraphicsState();
+    font(32, "bold");
     color(WHITE);
-    doc.text(value, gx + 14, 822);
-    font(9.5);
-    doc.text(label, gx + 14, 844);
-  });
+    doc.text("Reporte de comentarios", M + 32, y + 62);
+    font(11);
+    withOpacity(0.9, () => {
+      color(WHITE);
+      paragraph(
+        `Análisis de la conversación en ${stats.videos.length} ${stats.videos.length === 1 ? "video" : "videos"} de Instagram: sentimiento, temas, actividad y comentarios destacados.`,
+        M + 32,
+        y + 90,
+        CW - 64,
+        16,
+        2
+      );
+    });
 
-  withOpacity(0.16, () => {
-    fill(WHITE);
-    doc.rect(0, H - 120, W, 120, "F");
-  });
-  font(9);
-  color(WHITE);
-  doc.text("Preparado con", M + 8, H - 74);
-  doc.text("Fecha", W - M - 8, H - 74, { align: "right" });
-  font(12, "bold");
-  doc.text("Comment Export", M + 8, H - 54);
-  doc.text(exportedAt, W - M - 8, H - 54, { align: "right" });
-  if (input.activeFilterLabel) {
-    font(9);
-    doc.text(`Listados filtrados: ${clean(input.activeFilterLabel)}`, W / 2, H - 54, { align: "center" });
+    // Tarjetas "de vidrio" con los números principales
+    const heroStats: [string, string][] = [
+      [formatNumber(stats.totalComments), "Comentarios"],
+      [formatNumber(stats.uniqueUsers), "Personas"],
+      [formatNumber(stats.totalLikes), "Likes"],
+    ];
+    const gGap = 16;
+    const gW = (CW - 64 - gGap * 2) / 3;
+    heroStats.forEach(([value, label], i) => {
+      const gx = M + 32 + i * (gW + gGap);
+      withOpacity(0.18, () => {
+        fill(WHITE);
+        doc.roundedRect(gx, y + 132, gW, 96, 16, 16, "F");
+      });
+      font(30, "bold");
+      color(WHITE);
+      doc.text(value, gx + 20, y + 180);
+      font(11);
+      doc.text(label, gx + 20, y + 206);
+    });
+
+    withOpacity(0.85, () => {
+      font(9);
+      color(WHITE);
+      doc.text(`${PREPARED_BY} · ${exportedAt}`, M + 32, y + 268);
+      if (input.activeFilterLabel) {
+        doc.text(`Listados filtrados: ${clean(input.activeFilterLabel)}`, M + CW - 32, y + 268, { align: "right" });
+      }
+    });
+    y += hh + 30;
   }
 
   // ——— Resumen general ———
 
-  startPage();
   heading("Resumen", "general", "Indicadores calculados sobre todos los comentarios obtenidos.");
 
   const kpis: { icon: IconKind; label: string; value: string; trend: [string, Sentiment]; note: string }[] = [
@@ -582,7 +562,7 @@ export async function renderPdfReport(input: ExportInput) {
           label: "Promedio de likes",
           value: stats.avgLikes.toFixed(1).replace(".", ","),
           trend: ["por comentario", "neutral"] as [string, Sentiment],
-          note: "Analizá los comentarios para sumar sentimiento.",
+          note: "Likes recibidos en promedio por comentario.",
         };
 
   const kGap = 14;
@@ -1120,16 +1100,16 @@ export async function renderPdfReport(input: ExportInput) {
 
   // Pies de página
   const total = doc.getNumberOfPages();
-  for (let i = 2; i <= total; i++) {
+  for (let i = 1; i <= total; i++) {
     doc.setPage(i);
     stroke(LINE, 1);
     doc.line(M, H - 44, W - M, H - 44);
     font(8.5);
     color(MUTED);
-    doc.text("Comment Export · Reporte de comentarios de Instagram", M, H - 26);
+    doc.text(PREPARED_BY, M, H - 26);
     font(8.5, "bold");
     color(BLUE);
-    doc.text(`${String(i - 1).padStart(2, "0")} / ${String(total - 1).padStart(2, "0")}`, W - M, H - 26, { align: "right" });
+    doc.text(`${String(i).padStart(2, "0")} / ${String(total).padStart(2, "0")}`, W - M, H - 26, { align: "right" });
   }
 
   doc.save(`reporte-comentarios-instagram-${Date.now()}.pdf`);

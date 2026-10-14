@@ -224,9 +224,6 @@ export function computeReportStats(
   if (replyRate < 0.15) {
     attention.push(`Pocos comentarios generan hilo (${percent(replies, totalComments)} son respuestas): invitar a la conversación puede ayudar.`);
   }
-  if (!analysis) {
-    attention.push(`Analizá los comentarios en la app para sumar sentimiento y temas a este reporte.`);
-  }
 
   return {
     videos,
