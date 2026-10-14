@@ -78,8 +78,27 @@ la primera vez (`npx vercel login`) y vincular el proyecto (`npx vercel link`).
   nivel por video (las respuestas se suman aparte), con un presupuesto de tiempo de ~50s para no
   exceder el límite de función serverless.
 - `app/page.tsx`: UI para pegar URLs, ver el dashboard de resultados (respuestas indentadas y
-  marcadas con un ícono) y descargar el CSV, que incluye columnas `es_respuesta` y
-  `responde_a_comment_id`.
+  marcadas con un ícono), analizar/filtrar los comentarios y exportarlos.
+- `lib/export.ts`: generación del CSV y del PDF.
+
+## Análisis de sentimiento y filtros por tema
+
+Después de obtener los comentarios aparece el panel **Análisis y filtros**:
+
+- **Positivos / negativos / neutrales**: cada comentario se clasifica por sentimiento. Podés filtrar
+  la vista por sentimiento y ver las estadísticas (cantidad y porcentaje de cada uno).
+- **Filtros personalizados**: agregá tus propios temas con un nombre y una descripción en lenguaje
+  natural (por ejemplo *Precio* → "preguntan cuánto cuesta o por promociones"). Cada comentario se
+  etiqueta con los temas que trata y podés filtrar por tema.
+- **Exportación**: el CSV y el PDF respetan los filtros activos y agregan las columnas de
+  sentimiento y temas. El PDF incluye además una página de estadísticas (sentimiento general, por
+  video y por tema) y una sección por cada filtro con los comentarios que tratan ese tema.
+
+La clasificación usa Claude (`app/api/analyze/route.ts`) si configurás `ANTHROPIC_API_KEY` (en
+`.env.local` y en las variables de entorno de Vercel). Cada análisis consume tokens de tu cuenta de
+Anthropic. Sin la key, la app usa un análisis local por palabras clave y emojis
+(`lib/analysis.ts`), gratuito pero bastante menos preciso (no entiende ironía ni temas descritos
+con otras palabras).
 
 ## Límites conocidos
 

@@ -1,195 +1,36 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import type { ScrapeResult } from "@/lib/types";
+import type {
+  AnalyzeResponse,
+  CommentAnalysis,
+  CustomFilter,
+  ScrapeResult,
+  Sentiment,
+} from "@/lib/types";
+import { SENTIMENT_LABELS, percent, sentimentStats } from "@/lib/analysis";
+import { downloadCsv, downloadPdf, toCsv, type ExportInput } from "@/lib/export";
 
-function toCsv(results: ScrapeResult[]): string {
-  const header = ["usuario", "comentario"];
-  const rows = [header.join(",")];
+type SentimentFilter = "all" | Sentiment;
 
-  const escape = (value: string) => `"${value.replace(/"/g, '""')}"`;
+const SENTIMENT_FILTER_OPTIONS: { value: SentimentFilter; label: string }[] = [
+  { value: "all", label: "Todos" },
+  { value: "positive", label: "Positivos" },
+  { value: "negative", label: "Negativos" },
+  { value: "neutral", label: "Neutrales" },
+];
 
-  for (const result of results) {
-    for (const c of result.comments) {
-      rows.push([escape(c.username), escape(c.text)].join(","));
-    }
-  }
+const SENTIMENT_PLURAL_LABELS: Record<Sentiment, string> = {
+  positive: "Positivos",
+  negative: "Negativos",
+  neutral: "Neutrales",
+};
 
-  return rows.join("\n");
-}
-
-function downloadCsv(csv: string) {
-  const blob = new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8;" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = `comentarios-instagram-${Date.now()}.csv`;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(url);
-}
-
-const PDF_WIDTH = 1280;
-const PDF_HEIGHT = 720;
-const PDF_MARGIN = 48;
-const PDF_PURPLE: [number, number, number] = [88, 60, 172];
-const PDF_PINK: [number, number, number] = [193, 53, 132];
-const PDF_TEXT: [number, number, number] = [26, 26, 32];
-const PDF_MUTED: [number, number, number] = [110, 110, 125];
-
-function formatPdfDate(timestamp: number | null): string {
-  if (!timestamp) return "—";
-  const d = new Date(timestamp * 1000);
-  return d.toLocaleDateString("es-ES", { day: "2-digit", month: "2-digit", year: "numeric" });
-}
-
-async function downloadPdf(results: ScrapeResult[]) {
-  const [{ default: JsPDF }, { default: autoTable }] = await Promise.all([
-    import("jspdf"),
-    import("jspdf-autotable"),
-  ]);
-
-  const doc = new JsPDF({ unit: "px", format: [PDF_WIDTH, PDF_HEIGHT] });
-  const totalComments = results.reduce((sum, r) => sum + r.comments.length, 0);
-  const totalReplies = results.reduce(
-    (sum, r) => sum + r.comments.filter((c) => c.parentCommentId).length,
-    0
-  );
-
-  // Cover page
-  doc.setFillColor(...PDF_PURPLE);
-  doc.roundedRect(PDF_MARGIN, 90, PDF_WIDTH - PDF_MARGIN * 2, 8, 4, 4, "F");
-
-  doc.setTextColor(...PDF_TEXT);
-  doc.setFont("helvetica", "bold");
-  doc.setFontSize(34);
-  doc.text("Comentarios de Instagram", PDF_MARGIN, 160);
-
-  doc.setFont("helvetica", "normal");
-  doc.setFontSize(13);
-  doc.setTextColor(...PDF_MUTED);
-  const exportedAt = new Date().toLocaleString("es-ES", {
-    day: "2-digit",
-    month: "2-digit",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-  doc.text(`Exportado el ${exportedAt}`, PDF_MARGIN, 188);
-
-  const stats: [string, string][] = [
-    [String(results.length), "Videos"],
-    [String(totalComments), "Comentarios totales"],
-    [String(totalReplies), "Respuestas"],
-  ];
-  const cardWidth = 220;
-  const cardGap = 24;
-  stats.forEach(([value, label], i) => {
-    const x = PDF_MARGIN + i * (cardWidth + cardGap);
-    const y = 260;
-    doc.setDrawColor(225, 225, 235);
-    doc.setLineWidth(1);
-    doc.roundedRect(x, y, cardWidth, 110, 12, 12, "S");
-    doc.setTextColor(...PDF_PURPLE);
-    doc.setFont("helvetica", "bold");
-    doc.setFontSize(30);
-    doc.text(value, x + 20, y + 55);
-    doc.setTextColor(...PDF_MUTED);
-    doc.setFont("helvetica", "normal");
-    doc.setFontSize(11);
-    doc.text(label, x + 20, y + 82);
-  });
-
-  doc.setTextColor(...PDF_MUTED);
-  doc.setFontSize(10);
-  doc.text(
-    "Generado con Comment Export — instagram-comments-exporter.vercel.app",
-    PDF_MARGIN,
-    PDF_HEIGHT - 40
-  );
-
-  for (const result of results) {
-    if (result.comments.length === 0) continue;
-
-    doc.addPage([PDF_WIDTH, PDF_HEIGHT]);
-
-    doc.setFillColor(...PDF_PINK);
-    doc.roundedRect(PDF_MARGIN, 40, 6, 32, 3, 3, "F");
-
-    doc.setTextColor(...PDF_TEXT);
-    doc.setFont("helvetica", "bold");
-    doc.setFontSize(16);
-    const urlLine = doc.splitTextToSize(result.url, PDF_WIDTH - PDF_MARGIN * 2 - 20)[0];
-    doc.text(urlLine, PDF_MARGIN + 22, 64);
-
-    doc.setFont("helvetica", "normal");
-    doc.setFontSize(11);
-    doc.setTextColor(...PDF_MUTED);
-    const replyCount = result.comments.filter((c) => c.parentCommentId).length;
-    doc.text(
-      `${result.comments.length} comentarios${replyCount ? ` · ${replyCount} respuestas` : ""}`,
-      PDF_MARGIN + 22,
-      84
-    );
-
-    const body = result.comments.map((c) => [
-      c.parentCommentId ? `↳ ${c.username}` : c.username,
-      c.text,
-      formatPdfDate(c.timestamp),
-      c.likeCount != null ? String(c.likeCount) : "—",
-    ]);
-
-    autoTable(doc, {
-      head: [["Usuario", "Comentario", "Fecha", "Likes"]],
-      body,
-      startY: 110,
-      margin: { left: PDF_MARGIN, right: PDF_MARGIN, bottom: 40 },
-      theme: "striped",
-      styles: {
-        fontSize: 9.5,
-        cellPadding: 8,
-        textColor: PDF_TEXT,
-        lineColor: [235, 235, 242],
-        overflow: "linebreak",
-        valign: "top",
-      },
-      headStyles: {
-        fillColor: PDF_PURPLE,
-        textColor: 255,
-        fontStyle: "bold",
-        fontSize: 10.5,
-      },
-      alternateRowStyles: { fillColor: [247, 247, 251] },
-      columnStyles: {
-        0: { cellWidth: 170 },
-        1: { cellWidth: "auto" },
-        2: { cellWidth: 100 },
-        3: { cellWidth: 60, halign: "right" },
-      },
-      didParseCell: (data) => {
-        if (data.section === "body" && data.column.index === 0) {
-          const raw = data.cell.raw;
-          if (typeof raw === "string" && raw.startsWith("↳")) {
-            data.cell.styles.textColor = PDF_MUTED;
-            data.cell.styles.fontStyle = "italic";
-          }
-        }
-      },
-    });
-  }
-
-  const pageCount = doc.getNumberOfPages();
-  for (let i = 2; i <= pageCount; i++) {
-    doc.setPage(i);
-    doc.setFont("helvetica", "normal");
-    doc.setFontSize(9);
-    doc.setTextColor(...PDF_MUTED);
-    doc.text(`Página ${i - 1} de ${pageCount - 1}`, PDF_WIDTH - PDF_MARGIN - 70, PDF_HEIGHT - 20);
-  }
-
-  doc.save(`comentarios-instagram-${Date.now()}.pdf`);
-}
+const FILTER_PRESETS: Omit<CustomFilter, "id">[] = [
+  { name: "Precio", description: "preguntan por el precio, costos o cuánto sale" },
+  { name: "Preguntas", description: "hacen una pregunta o piden información" },
+  { name: "Quejas", description: "se quejan de un servicio, producto o mala experiencia" },
+];
 
 const AVATAR_COLORS = ["#405de6", "#833ab4", "#c13584", "#e1306c", "#fd8d1d", "#1a9e7a", "#0e8fd9"];
 
@@ -286,6 +127,15 @@ function IconFileText() {
   );
 }
 
+function IconPlus() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <line x1="12" y1="5" x2="12" y2="19" />
+      <line x1="5" y1="12" x2="19" y2="12" />
+    </svg>
+  );
+}
+
 function IconReply() {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -311,6 +161,19 @@ export default function Home() {
   const [results, setResults] = useState<ScrapeResult[]>([]);
   const [requestError, setRequestError] = useState<string | null>(null);
 
+  const [filters, setFilters] = useState<CustomFilter[]>([]);
+  const [newFilterName, setNewFilterName] = useState("");
+  const [newFilterDescription, setNewFilterDescription] = useState("");
+  const [analysis, setAnalysis] = useState<Record<string, CommentAnalysis> | null>(null);
+  const [analysisEngine, setAnalysisEngine] = useState<AnalyzeResponse["engine"] | null>(null);
+  const [analysisWarning, setAnalysisWarning] = useState<string | null>(null);
+  const [analysisError, setAnalysisError] = useState<string | null>(null);
+  const [analyzing, setAnalyzing] = useState(false);
+  // Filtros con los que se hizo el último análisis, para saber si quedó desactualizado.
+  const [analyzedFilters, setAnalyzedFilters] = useState<CustomFilter[]>([]);
+  const [sentimentFilter, setSentimentFilter] = useState<SentimentFilter>("all");
+  const [topicFilter, setTopicFilter] = useState<string>("all");
+
   const lineCount = input.split("\n").map((l) => l.trim()).filter(Boolean).length;
 
   const totalComments = useMemo(
@@ -323,6 +186,120 @@ export default function Home() {
   );
   const okCount = results.filter((r) => r.ok).length;
   const errorCount = results.filter((r) => !r.ok).length;
+
+  const analysisStale = analysis !== null && JSON.stringify(analyzedFilters) !== JSON.stringify(filters);
+  // Filtros que tienen resultados válidos: los analizados que el usuario no quitó ni editó.
+  const appliedFilters = useMemo(
+    () =>
+      analysis
+        ? analyzedFilters.filter((af) =>
+            filters.some((f) => f.id === af.id && f.name === af.name && f.description === af.description)
+          )
+        : [],
+    [analysis, analyzedFilters, filters]
+  );
+
+  const filteredResults = useMemo(() => {
+    const topic = appliedFilters.some((f) => f.id === topicFilter) ? topicFilter : "all";
+    if (!analysis || (sentimentFilter === "all" && topic === "all")) return results;
+    return results.map((r) => ({
+      ...r,
+      comments: r.comments.filter((c) => {
+        const a = analysis[c.commentId];
+        if (!a) return false;
+        if (sentimentFilter !== "all" && a.sentiment !== sentimentFilter) return false;
+        if (topic !== "all" && !a.filterIds.includes(topic)) return false;
+        return true;
+      }),
+    }));
+  }, [results, analysis, sentimentFilter, topicFilter, appliedFilters]);
+
+  const filteredCount = useMemo(
+    () => filteredResults.reduce((sum, r) => sum + r.comments.length, 0),
+    [filteredResults]
+  );
+
+  const allComments = useMemo(() => results.flatMap((r) => r.comments), [results]);
+  const overallStats = useMemo(
+    () => (analysis ? sentimentStats(allComments, analysis) : null),
+    [allComments, analysis]
+  );
+  const topicCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    if (!analysis) return counts;
+    for (const c of allComments) {
+      for (const id of analysis[c.commentId]?.filterIds ?? []) counts[id] = (counts[id] ?? 0) + 1;
+    }
+    return counts;
+  }, [allComments, analysis]);
+
+  const activeFilterLabel = useMemo(() => {
+    const parts: string[] = [];
+    if (analysis && sentimentFilter !== "all") {
+      parts.push(`Solo ${SENTIMENT_FILTER_OPTIONS.find((o) => o.value === sentimentFilter)?.label.toLowerCase()}`);
+    }
+    if (analysis && topicFilter !== "all") {
+      const f = appliedFilters.find((x) => x.id === topicFilter);
+      if (f) parts.push(`Tema: ${f.name}`);
+    }
+    return parts.length > 0 ? parts.join(" · ") : null;
+  }, [analysis, sentimentFilter, topicFilter, appliedFilters]);
+
+  const exportInput: ExportInput = {
+    allResults: results,
+    results: filteredResults,
+    analysis,
+    filters: appliedFilters,
+    activeFilterLabel,
+  };
+
+  function addFilter(name: string, description: string) {
+    const trimmedName = name.trim();
+    const trimmedDescription = description.trim() || trimmedName;
+    if (!trimmedName) return;
+    setFilters((prev) => [
+      ...prev,
+      { id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, name: trimmedName, description: trimmedDescription },
+    ]);
+    setNewFilterName("");
+    setNewFilterDescription("");
+  }
+
+  function removeFilter(id: string) {
+    setFilters((prev) => prev.filter((f) => f.id !== id));
+    if (topicFilter === id) setTopicFilter("all");
+  }
+
+  async function handleAnalyze() {
+    if (allComments.length === 0) return;
+    setAnalyzing(true);
+    setAnalysisError(null);
+    try {
+      const res = await fetch("/api/analyze", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          comments: allComments.map((c) => ({ id: c.commentId, text: c.text })),
+          filters,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setAnalysisError(data.error ?? "Error al analizar los comentarios.");
+        return;
+      }
+      const response = data as AnalyzeResponse;
+      setAnalysis(response.analysis);
+      setAnalysisEngine(response.engine);
+      setAnalysisWarning(response.warning ?? null);
+      setAnalyzedFilters(filters);
+      if (topicFilter !== "all" && !filters.some((f) => f.id === topicFilter)) setTopicFilter("all");
+    } catch (err) {
+      setAnalysisError(err instanceof Error ? err.message : "Error de red.");
+    } finally {
+      setAnalyzing(false);
+    }
+  }
 
   async function handleSubmit() {
     const urls = input
@@ -337,6 +314,12 @@ export default function Home() {
 
     setLoading(true);
     setRequestError(null);
+    setAnalysis(null);
+    setAnalysisEngine(null);
+    setAnalysisWarning(null);
+    setAnalysisError(null);
+    setSentimentFilter("all");
+    setTopicFilter("all");
     try {
       const res = await fetch("/api/comments", {
         method: "POST",
@@ -360,7 +343,7 @@ export default function Home() {
   async function handlePdfExport() {
     setPdfLoading(true);
     try {
-      await downloadPdf(results);
+      await downloadPdf(exportInput);
     } finally {
       setPdfLoading(false);
     }
@@ -419,15 +402,15 @@ export default function Home() {
           </button>
           <button
             className="btn-secondary"
-            disabled={totalComments === 0}
-            onClick={() => downloadCsv(toCsv(results))}
+            disabled={filteredCount === 0}
+            onClick={() => downloadCsv(toCsv(exportInput))}
           >
             <IconDownload />
-            Descargar CSV ({totalComments})
+            Descargar CSV ({filteredCount})
           </button>
           <button
             className="btn-secondary"
-            disabled={totalComments === 0 || pdfLoading}
+            disabled={filteredCount === 0 || pdfLoading}
             onClick={handlePdfExport}
           >
             {pdfLoading ? <span className="spinner spinner-dark" /> : <IconFileText />}
@@ -479,9 +462,193 @@ export default function Home() {
             </div>
           </div>
 
+          {totalComments > 0 && (
+            <div className="card analysis-card">
+              <div className="analysis-head">
+                <div>
+                  <h3>Análisis y filtros</h3>
+                  <p>
+                    Clasificá los comentarios en positivos, negativos y neutrales, y creá tus propios
+                    filtros por tema. Los filtros activos se aplican al CSV y al PDF, y el PDF incluye
+                    una página de estadísticas y una sección por cada tema.
+                  </p>
+                </div>
+              </div>
+
+              <div className="filter-builder">
+                <label>Filtros personalizados por tema</label>
+                <div className="filter-inputs">
+                  <input
+                    type="text"
+                    placeholder="Nombre (ej. Precio)"
+                    value={newFilterName}
+                    maxLength={40}
+                    onChange={(e) => setNewFilterName(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") addFilter(newFilterName, newFilterDescription);
+                    }}
+                  />
+                  <input
+                    type="text"
+                    className="filter-description-input"
+                    placeholder="¿De qué tratan? (ej. preguntan cuánto cuesta o por promociones)"
+                    value={newFilterDescription}
+                    maxLength={200}
+                    onChange={(e) => setNewFilterDescription(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") addFilter(newFilterName, newFilterDescription);
+                    }}
+                  />
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    disabled={!newFilterName.trim() || filters.length >= 10}
+                    onClick={() => addFilter(newFilterName, newFilterDescription)}
+                  >
+                    <IconPlus />
+                    Agregar
+                  </button>
+                </div>
+                {filters.length === 0 ? (
+                  <div className="filter-presets">
+                    <span>Sugerencias:</span>
+                    {FILTER_PRESETS.map((preset) => (
+                      <button
+                        type="button"
+                        key={preset.name}
+                        className="chip chip-ghost"
+                        onClick={() => addFilter(preset.name, preset.description)}
+                      >
+                        + {preset.name}
+                      </button>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="filter-list">
+                    {filters.map((f) => (
+                      <span className="chip" key={f.id} title={f.description}>
+                        <strong>{f.name}</strong>
+                        <span className="chip-description">{f.description}</span>
+                        {analysis && topicCounts[f.id] !== undefined && (
+                          <span className="chip-count">{topicCounts[f.id]}</span>
+                        )}
+                        <button
+                          type="button"
+                          className="chip-remove"
+                          aria-label={`Quitar filtro ${f.name}`}
+                          onClick={() => removeFilter(f.id)}
+                        >
+                          ×
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <div className="actions">
+                <button className="btn-primary" onClick={handleAnalyze} disabled={analyzing}>
+                  {analyzing && <span className="spinner" />}
+                  {analyzing
+                    ? "Analizando comentarios…"
+                    : analysis
+                      ? "Volver a analizar"
+                      : `Analizar ${totalComments} comentarios`}
+                </button>
+                {analysisStale && !analyzing && (
+                  <span className="analysis-hint">
+                    Cambiaste los filtros: volvé a analizar para aplicarlos.
+                  </span>
+                )}
+                {analysisEngine && !analysisStale && !analyzing && (
+                  <span className="analysis-hint">
+                    {analysisEngine === "claude" ? "Analizado con IA (Claude)" : "Análisis local por palabras clave"}
+                  </span>
+                )}
+              </div>
+              {analysisWarning && (
+                <div className="analysis-warning">
+                  <IconAlertTriangle />
+                  <span>{analysisWarning}</span>
+                </div>
+              )}
+              {analysisError && (
+                <div className="request-error">
+                  <IconAlertCircle />
+                  <span>{analysisError}</span>
+                </div>
+              )}
+
+              {analysis && overallStats && (
+                <>
+                  <div className="sentiment-summary">
+                    <div className="sentiment-bar" aria-hidden="true">
+                      {(["positive", "neutral", "negative"] as Sentiment[]).map((key) =>
+                        overallStats[key] > 0 ? (
+                          <span
+                            key={key}
+                            className={`sentiment-bar-segment sentiment-bg--${key}`}
+                            style={{ flexGrow: overallStats[key] }}
+                          />
+                        ) : null
+                      )}
+                    </div>
+                    <div className="stats sentiment-stats">
+                      {(["positive", "negative", "neutral"] as Sentiment[]).map((key) => (
+                        <div className={`stat stat--${key}`} key={key}>
+                          <div className="value">{overallStats[key]}</div>
+                          <div className="label">
+                            {SENTIMENT_PLURAL_LABELS[key]} · {percent(overallStats[key], overallStats.total)}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="filter-controls">
+                    <div className="segmented" role="group" aria-label="Filtrar por sentimiento">
+                      {SENTIMENT_FILTER_OPTIONS.map((o) => (
+                        <button
+                          type="button"
+                          key={o.value}
+                          className={sentimentFilter === o.value ? "active" : undefined}
+                          onClick={() => setSentimentFilter(o.value)}
+                        >
+                          {o.label}
+                          <span className="segmented-count">
+                            {o.value === "all" ? overallStats.total : overallStats[o.value]}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                    {appliedFilters.length > 0 && (
+                      <select
+                        value={appliedFilters.some((f) => f.id === topicFilter) ? topicFilter : "all"}
+                        onChange={(e) => setTopicFilter(e.target.value)}
+                        aria-label="Filtrar por tema"
+                      >
+                        <option value="all">Todos los temas</option>
+                        {appliedFilters.map((f) => (
+                          <option key={f.id} value={f.id}>
+                            {f.name} ({topicCounts[f.id] ?? 0})
+                          </option>
+                        ))}
+                      </select>
+                    )}
+                  </div>
+                  {activeFilterLabel && (
+                    <p className="analysis-hint">
+                      Mostrando {filteredCount} de {totalComments} comentarios · {activeFilterLabel}
+                    </p>
+                  )}
+                </>
+              )}
+            </div>
+          )}
+
           <p className="section-heading">Resultados por video</p>
 
-          {results.map((result) => (
+          {filteredResults.map((result, index) => (
             <div className="result-block" key={result.url}>
               <div className="result-header">
                 <div className="result-header-main">
@@ -493,7 +660,11 @@ export default function Home() {
                   </a>
                 </div>
                 <span className={`badge ${result.ok ? "badge-ok" : "badge-error"}`}>
-                  {result.ok ? `${result.comments.length} comentarios` : "sin datos"}
+                  {!result.ok
+                    ? "sin datos"
+                    : result.comments.length === results[index].comments.length
+                      ? `${result.comments.length} comentarios`
+                      : `${result.comments.length} de ${results[index].comments.length} comentarios`}
                 </span>
               </div>
               {result.error && (
@@ -501,6 +672,9 @@ export default function Home() {
                   <IconAlertCircle />
                   <span>{result.error}</span>
                 </div>
+              )}
+              {result.ok && result.comments.length === 0 && (
+                <p className="filter-empty">Ningún comentario de este video coincide con los filtros.</p>
               )}
               {result.comments.length > 0 && (
                 <table className="comments-table">
@@ -510,6 +684,7 @@ export default function Home() {
                       <th>Comentario</th>
                       <th className="col-date">Fecha</th>
                       <th className="col-likes">Likes</th>
+                      {analysis && <th className="col-sentiment">Sentimiento</th>}
                     </tr>
                   </thead>
                   <tbody>
@@ -526,6 +701,17 @@ export default function Home() {
                         </td>
                         <td data-label="Comentario">
                           <CommentText text={c.text} />
+                          {analysis && (
+                            <div className="topic-tags">
+                              {appliedFilters
+                                .filter((f) => analysis[c.commentId]?.filterIds.includes(f.id))
+                                .map((f) => (
+                                  <span className="topic-tag" key={f.id}>
+                                    {f.name}
+                                  </span>
+                                ))}
+                            </div>
+                          )}
                         </td>
                         <td className="col-date" data-label="Fecha">
                           {formatRelative(c.timestamp)}
@@ -533,6 +719,17 @@ export default function Home() {
                         <td className="col-likes" data-label="Likes">
                           {c.likeCount ?? "—"}
                         </td>
+                        {analysis && (
+                          <td className="col-sentiment" data-label="Sentimiento">
+                            {analysis[c.commentId] ? (
+                              <span className={`sentiment-badge sentiment--${analysis[c.commentId].sentiment}`}>
+                                {SENTIMENT_LABELS[analysis[c.commentId].sentiment]}
+                              </span>
+                            ) : (
+                              "—"
+                            )}
+                          </td>
+                        )}
                       </tr>
                     ))}
                   </tbody>

@@ -17,3 +17,30 @@ export interface ScrapeResult {
   mode: "authenticated" | "anonymous" | "none";
   comments: CommentItem[];
 }
+
+export type Sentiment = "positive" | "negative" | "neutral";
+
+/** Filtro temático definido por el usuario, p. ej. "Precio" → "preguntan cuánto cuesta". */
+export interface CustomFilter {
+  id: string;
+  name: string;
+  description: string;
+}
+
+export interface CommentAnalysis {
+  sentiment: Sentiment;
+  /** IDs de los CustomFilter que aplican a este comentario. */
+  filterIds: string[];
+}
+
+export interface AnalyzeRequestComment {
+  id: string;
+  text: string;
+}
+
+export interface AnalyzeResponse {
+  /** Análisis por commentId. */
+  analysis: Record<string, CommentAnalysis>;
+  engine: "claude" | "local";
+  warning?: string;
+}
