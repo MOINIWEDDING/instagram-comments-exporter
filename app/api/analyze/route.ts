@@ -23,7 +23,7 @@ const CONCURRENCY = 6;
 const BatchResultSchema = z.object({
   results: z.array(
     z.object({
-      i: z.number().int(),
+      i: z.number(),
       sentiment: z.enum(["positive", "negative", "neutral"]),
       filters: z.array(z.string()),
     })
@@ -37,6 +37,23 @@ Para cada comentario devolvé:
 - filters: los códigos de los filtros temáticos (f1, f2, …) cuya descripción aplica al comentario. Un comentario puede coincidir con varios filtros o con ninguno; solo incluilo cuando el comentario realmente trata ese tema.
 
 Devolvé exactamente un resultado por cada comentario recibido, usando su índice "i".`;
+
+/** Traduce el error de OpenAI a un motivo entendible para mostrar en la app. */
+function describeOpenAIError(err: unknown): string {
+  if (err instanceof OpenAI.APIError) {
+    if (err.status === 401) return "La OPENAI_API_KEY no es válida: revisá que esté bien copiada.";
+    if (err.status === 429 && err.code === "insufficient_quota") {
+      return "Tu cuenta de OpenAI no tiene saldo: cargalo en platform.openai.com/settings/organization/billing.";
+    }
+    if (err.status === 429) return "OpenAI limitó la cantidad de pedidos (rate limit): esperá un momento y volvé a intentar.";
+    if (err.status === 404 || err.code === "model_not_found") {
+      return `Tu cuenta de OpenAI no tiene acceso al modelo "${MODEL}": probá con OPENAI_MODEL=gpt-4o-mini.`;
+    }
+    return `OpenAI respondió con error ${err.status ?? ""}: ${err.message}`;
+  }
+  if (err instanceof OpenAI.APIConnectionError) return "No se pudo conectar con OpenAI.";
+  return err instanceof Error ? err.message : "Error desconocido.";
+}
 
 function hasOpenAICredentials(): boolean {
   return Boolean(process.env.OPENAI_API_KEY);
@@ -134,6 +151,7 @@ export async function POST(req: NextRequest) {
 
   const analysis: Record<string, CommentAnalysis> = {};
   let failedBatches = 0;
+  let firstError: string | null = null;
   let next = 0;
 
   async function worker() {
@@ -143,6 +161,7 @@ export async function POST(req: NextRequest) {
         Object.assign(analysis, await classifyBatch(client, batch, filters));
       } catch (err) {
         failedBatches++;
+        firstError ??= describeOpenAIError(err);
         console.error("Fallo al clasificar lote con OpenAI:", err);
       }
       // Lo que el modelo no devolvió (lote fallido o índices faltantes) se completa localmente.
@@ -158,7 +177,7 @@ export async function POST(req: NextRequest) {
     engine: "openai",
     warning:
       failedBatches > 0
-        ? `${failedBatches} de ${batches.length} lotes no pudieron analizarse con IA y se clasificaron con el análisis local.`
+        ? `${failedBatches} de ${batches.length} lotes no pudieron analizarse con IA y se clasificaron con el análisis local. Motivo: ${firstError}`
         : undefined,
   };
   return NextResponse.json(result);
