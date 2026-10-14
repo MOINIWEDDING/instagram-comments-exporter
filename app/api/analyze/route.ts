@@ -16,6 +16,8 @@ export const maxDuration = 60;
 // Modelo de Gemini con plan gratuito; el alias apunta siempre al Flash-Lite más reciente.
 // Se puede cambiar con GEMINI_MODEL.
 const MODEL = process.env.GEMINI_MODEL || "gemini-flash-lite-latest";
+// Si el modelo principal está saturado o sin cupo, se prueba con este (también tiene plan gratuito).
+const MODELS = [MODEL, "gemini-flash-latest"].filter((m, i, all) => all.indexOf(m) === i);
 const MAX_COMMENTS = 5000;
 const MAX_FILTERS = 10;
 // Lotes grandes y poca concurrencia para respetar los límites por minuto del plan gratuito.
@@ -77,6 +79,9 @@ function describeGeminiError(err: unknown): string {
       return "La GEMINI_API_KEY no es válida: revisá que esté bien copiada.";
     }
     if (err.status === 403) return "La GEMINI_API_KEY no tiene permiso para usar la API de Gemini.";
+    if (err.status === 503 || err.status === 500) {
+      return "Gemini está saturado en este momento (error 503) y no respondió tras varios reintentos: probá de nuevo en unos minutos.";
+    }
     if (err.status === 429) {
       return "Se alcanzó el límite gratuito de Gemini (pedidos por minuto o por día): esperá un rato y volvé a analizar.";
     }
@@ -88,11 +93,60 @@ function describeGeminiError(err: unknown): string {
   return err instanceof Error ? err.message : "Error desconocido.";
 }
 
-/** Segundos que Gemini pide esperar tras un 429 (viene como "retryDelay": "23s"). */
-function retryDelayMs(err: unknown): number | null {
-  if (!(err instanceof ApiError) || err.status !== 429) return null;
-  const match = err.message.match(/retryDelay"?\s*:\s*"(\d+(?:\.\d+)?)s"/);
-  return match ? Math.ceil(Number(match[1]) * 1000) : 10_000;
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Cuánto esperar antes de reintentar con el mismo modelo, o null si no conviene reintentar.
+ * 503/500 (servidores saturados): hasta 2 reintentos con espera creciente.
+ * 429 (límite gratuito): un reintento esperando lo que pide Gemini ("retryDelay": "23s").
+ */
+function waitBeforeRetry(err: unknown, attempt: number): number | null {
+  if (!(err instanceof ApiError)) return attempt < 2 ? 1_500 : null;
+  if (err.status === 503 || err.status === 500) return attempt < 2 ? 2_000 * (attempt + 1) : null;
+  if (err.status === 429 && attempt === 0) {
+    const match = err.message.match(/retryDelay"?\s*:\s*"(\d+(?:\.\d+)?)s"/);
+    return match ? Math.ceil(Number(match[1]) * 1000) : 10_000;
+  }
+  return null;
+}
+
+/** Errores de configuración (key inválida, sin permiso) que no se arreglan cambiando de modelo. */
+function isConfigError(err: unknown): boolean {
+  return err instanceof ApiError && (err.status === 401 || err.status === 403 || (err.status === 400 && /api key/i.test(err.message)));
+}
+
+// Modelos que quedaron saturados hace poco: se saltean durante un minuto para no esperarlos de nuevo.
+const busyUntil = new Map<string, number>();
+const BUSY_COOLDOWN_MS = 60_000;
+
+type GenerateParams = Omit<Parameters<GoogleGenAI["models"]["generateContent"]>[0], "model">;
+
+/** Llama a Gemini con reintentos y, si el modelo sigue fallando, prueba con el de respaldo. */
+async function generate(ai: GoogleGenAI, params: GenerateParams, deadline: number): Promise<string> {
+  let lastError: unknown;
+  const available = MODELS.filter((m) => (busyUntil.get(m) ?? 0) < Date.now());
+  for (const model of available.length > 0 ? available : MODELS) {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        const response = await ai.models.generateContent({ ...params, model });
+        if (!response.text) throw new Error("Gemini devolvió una respuesta vacía.");
+        return response.text;
+      } catch (err) {
+        lastError = err;
+        if (isConfigError(err)) throw err;
+        const wait = waitBeforeRetry(err, attempt);
+        if (wait === null || Date.now() + wait + 5_000 > deadline) {
+          if (err instanceof ApiError && (err.status === 503 || err.status === 429)) {
+            busyUntil.set(model, Date.now() + BUSY_COOLDOWN_MS);
+          }
+          break;
+        }
+        await sleep(wait);
+      }
+    }
+    if (Date.now() + 5_000 > deadline) break;
+  }
+  throw lastError;
 }
 
 function hasGeminiCredentials(): boolean {
@@ -102,7 +156,8 @@ function hasGeminiCredentials(): boolean {
 async function classifyBatch(
   ai: GoogleGenAI,
   batch: AnalyzeRequestComment[],
-  filters: CustomFilter[]
+  filters: CustomFilter[],
+  deadline: number
 ): Promise<Record<string, CommentAnalysis>> {
   const codeToId = new Map(filters.map((f, idx) => [`f${idx + 1}`, f.id]));
   const filtersText =
@@ -111,8 +166,7 @@ async function classifyBatch(
       : "(sin filtros temáticos: devolvé filters vacío)";
   const commentsText = batch.map((c, i) => JSON.stringify({ i, text: c.text })).join("\n");
 
-  const response = await ai.models.generateContent({
-    model: MODEL,
+  const text = await generate(ai, {
     contents: `Filtros temáticos:\n${filtersText}\n\nComentarios (uno por línea, JSON):\n${commentsText}`,
     config: {
       systemInstruction: SYSTEM_PROMPT,
@@ -120,10 +174,8 @@ async function classifyBatch(
       responseJsonSchema: RESPONSE_JSON_SCHEMA,
       temperature: 0,
     },
-  });
+  }, deadline);
 
-  const text = response.text;
-  if (!text) throw new Error("Gemini devolvió una respuesta vacía.");
   const parsed = BatchResultSchema.parse(JSON.parse(text));
 
   const out: Record<string, CommentAnalysis> = {};
@@ -147,7 +199,8 @@ async function generateInsights(
   ai: GoogleGenAI,
   comments: AnalyzeRequestComment[],
   analysis: Record<string, CommentAnalysis>,
-  filters: CustomFilter[]
+  filters: CustomFilter[],
+  deadline: number
 ): Promise<AiInsights> {
   const sample = [...comments]
     .sort((a, b) => (b.likeCount ?? 0) - (a.likeCount ?? 0))
@@ -163,8 +216,7 @@ async function generateInsights(
   });
   const themes = filters.length > 0 ? `\nTemas definidos por el usuario: ${filters.map((f) => f.name).join(", ")}.` : "";
 
-  const response = await ai.models.generateContent({
-    model: MODEL,
+  const text = await generate(ai, {
     contents: `Total: ${comments.length} comentarios (${counts.positive} positivos, ${counts.negative} negativos, ${counts.neutral} neutrales).${themes}\n\nComentarios (los ${sample.length} con más likes):\n${lines.join("\n")}`,
     config: {
       systemInstruction: INSIGHTS_PROMPT,
@@ -172,9 +224,7 @@ async function generateInsights(
       responseJsonSchema: INSIGHTS_JSON_SCHEMA,
       temperature: 0.3,
     },
-  });
-  const text = response.text;
-  if (!text) throw new Error("Gemini devolvió una respuesta vacía.");
+  }, deadline);
   return InsightsSchema.parse(JSON.parse(text));
 }
 
@@ -246,25 +296,11 @@ export async function POST(req: NextRequest) {
     while (next < batches.length) {
       const batch = batches[next++];
       try {
-        Object.assign(analysis, await classifyBatch(ai, batch, filters));
+        Object.assign(analysis, await classifyBatch(ai, batch, filters, deadline));
       } catch (err) {
-        // Con el plan gratuito, un 429 suele resolverse esperando lo que pide Gemini: un reintento.
-        const wait = retryDelayMs(err);
-        let retried = false;
-        if (wait !== null && Date.now() + wait + 5_000 < deadline) {
-          await new Promise((resolve) => setTimeout(resolve, wait));
-          try {
-            Object.assign(analysis, await classifyBatch(ai, batch, filters));
-            retried = true;
-          } catch (retryErr) {
-            err = retryErr;
-          }
-        }
-        if (!retried) {
-          failedBatches++;
-          firstError ??= describeGeminiError(err);
-          console.error("Fallo al clasificar lote con Gemini:", err);
-        }
+        failedBatches++;
+        firstError ??= describeGeminiError(err);
+        console.error("Fallo al clasificar lote con Gemini:", err);
       }
       // Lo que el modelo no devolvió (lote fallido o índices faltantes) se completa localmente.
       const missing = batch.filter((c) => !analysis[c.id]);
@@ -285,7 +321,7 @@ export async function POST(req: NextRequest) {
   let insights: AiInsights | undefined;
   if (failedBatches < batches.length && Date.now() + 8_000 < deadline) {
     try {
-      insights = await generateInsights(ai, comments, analysis, filters);
+      insights = await generateInsights(ai, comments, analysis, filters, deadline);
     } catch (err) {
       console.error("Fallo al generar el análisis escrito con Gemini:", err);
       warnings.push(`No se pudo generar el análisis escrito de la IA. Motivo: ${describeGeminiError(err)}`);
