@@ -16,6 +16,8 @@ export interface ScrapeResult {
   error?: string;
   mode: "authenticated" | "anonymous" | "none";
   comments: CommentItem[];
+  /** Total de comentarios que informa Instagram para la publicación (incluye ocultos y borrados). */
+  reportedCount?: number | null;
 }
 
 /** Una tanda de comentarios de un video (ver /api/comments). */
@@ -24,6 +26,7 @@ export interface CommentsChunkResponse {
   mode: ScrapeResult["mode"];
   comments: CommentItem[];
   nextCursor: string | null;
+  reportedCount?: number | null;
   error?: string;
 }
 

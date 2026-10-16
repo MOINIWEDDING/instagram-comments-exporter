@@ -340,6 +340,7 @@ export default function Home() {
         const result: ScrapeResult = { url, shortcode: null, ok: false, mode: "none", comments: [] };
         const seen = new Set<string>();
         let cursor: string | null = null;
+        let retries = 0;
         setProgress({ video: index + 1, videos: urls.length, fetched: 0 });
 
         // Pide tandas hasta que Instagram indique que no hay más comentarios.
@@ -362,10 +363,20 @@ export default function Home() {
             seen.add(c.commentId);
             result.comments.push(c);
           }
+          if (chunk.reportedCount != null) result.reportedCount = chunk.reportedCount;
+          setProgress({ video: index + 1, videos: urls.length, fetched: result.comments.length });
+
+          if (chunk.error && chunk.nextCursor && retries < 3) {
+            // Error pasajero de Instagram: se espera un poco y se reintenta desde la página que falló.
+            retries++;
+            cursor = chunk.nextCursor;
+            await new Promise((resolve) => setTimeout(resolve, 4_000 * retries));
+            continue;
+          }
           if (chunk.error) result.error = chunk.error;
           // Si Instagram repite el cursor, se corta para no pedir lo mismo para siempre.
           cursor = chunk.nextCursor && chunk.nextCursor !== cursor ? chunk.nextCursor : null;
-          setProgress({ video: index + 1, videos: urls.length, fetched: result.comments.length });
+          retries = 0;
         } while (cursor && !result.error && result.comments.length < MAX_COMMENTS_PER_VIDEO);
 
         result.ok = result.comments.length > 0;
@@ -733,9 +744,11 @@ export default function Home() {
                 <span className={`badge ${result.ok ? "badge-ok" : "badge-error"}`}>
                   {!result.ok
                     ? "sin datos"
-                    : result.comments.length === results[index].comments.length
-                      ? `${result.comments.length} comentarios`
-                      : `${result.comments.length} de ${results[index].comments.length} comentarios`}
+                    : result.comments.length !== results[index].comments.length
+                      ? `${result.comments.length} de ${results[index].comments.length} comentarios`
+                      : (results[index].reportedCount ?? 0) > result.comments.length
+                        ? `${result.comments.length} de ${results[index].reportedCount} según Instagram`
+                        : `${result.comments.length} comentarios`}
                 </span>
               </div>
               {result.error && (

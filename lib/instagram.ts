@@ -73,16 +73,25 @@ function igHeaders(shortcode: string, cookie: string, csrfToken: string): Header
   };
 }
 
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
 async function igApiFetch(
   url: string,
   shortcode: string,
   cookie: string,
   csrfToken: string
 ): Promise<any> {
-  const res = await fetch(url, {
-    headers: igHeaders(shortcode, cookie, csrfToken),
-    cache: "no-store",
-  });
+  // Instagram a veces limita (429) o falla (5xx) por un momento: se reintenta con espera.
+  let res: Response | null = null;
+  for (const wait of [0, 2_000, 5_000]) {
+    if (wait) await sleep(wait);
+    res = await fetch(url, {
+      headers: igHeaders(shortcode, cookie, csrfToken),
+      cache: "no-store",
+    });
+    if (res.status !== 429 && res.status < 500) break;
+  }
+  if (!res) throw new Error("No se pudo contactar a Instagram.");
 
   if (res.status === 401 || res.status === 403) {
     throw new InstagramAuthRequiredError(
@@ -111,25 +120,62 @@ async function igApiFetch(
   return data;
 }
 
+/**
+ * Instagram pagina los comentarios en dos direcciones desde la primera página: `min_id` lleva a
+ * los más nuevos ("headload") y `max_id` a los más antiguos. Hay que recorrer ambas para no
+ * perder comentarios. El cursor guarda las dos direcciones pendientes.
+ */
+interface PageCursor {
+  min: string | null;
+  max: string | null;
+}
+
+function encodeCursor(cursor: PageCursor): string | null {
+  return cursor.min || cursor.max ? JSON.stringify(cursor) : null;
+}
+
+function decodeCursor(raw: string | null): PageCursor | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return { min: parsed.min ?? null, max: parsed.max ?? null };
+  } catch {
+    return { min: raw, max: null };
+  }
+}
+
 async function fetchCommentsPageAuthenticated(
   shortcode: string,
   mediaId: string,
   cookie: string,
   csrfToken: string,
-  minId: string | undefined
-): Promise<{ comments: PrivateApiComment[]; nextMinId: string | null; hasMore: boolean }> {
+  cursor: PageCursor | null
+): Promise<{ comments: PrivateApiComment[]; cursor: PageCursor; reportedCount: number | null }> {
   const url = new URL(`https://www.instagram.com/api/v1/media/${mediaId}/comments/`);
   url.searchParams.set("can_support_threading", "true");
   url.searchParams.set("permalink_enabled", "false");
-  if (minId) url.searchParams.set("min_id", minId);
+  const direction: "first" | "min" | "max" = !cursor ? "first" : cursor.min ? "min" : "max";
+  if (direction === "min") url.searchParams.set("min_id", cursor!.min!);
+  if (direction === "max") url.searchParams.set("max_id", cursor!.max!);
 
   const data = await igApiFetch(url.toString(), shortcode, cookie, csrfToken);
 
   const comments: PrivateApiComment[] = data.comments ?? [];
-  const nextMinId: string | null = data.next_min_id ?? null;
-  const hasMore: boolean = Boolean(data.has_more_headload_comments ?? data.has_more_comments ?? nextMinId);
+  const nextMin: string | null =
+    (data.has_more_headload_comments ?? Boolean(data.next_min_id)) && data.next_min_id ? String(data.next_min_id) : null;
+  const nextMax: string | null =
+    (data.has_more_comments ?? Boolean(data.next_max_id)) && data.next_max_id ? String(data.next_max_id) : null;
+  const reportedCount = typeof data.comment_count === "number" ? data.comment_count : null;
 
-  return { comments, nextMinId, hasMore };
+  // Solo avanza la dirección que se pidió; la otra queda pendiente como estaba.
+  const next: PageCursor =
+    direction === "first"
+      ? { min: nextMin, max: nextMax }
+      : direction === "min"
+        ? { min: nextMin, max: cursor!.max }
+        : { min: null, max: nextMax };
+
+  return { comments, cursor: next, reportedCount };
 }
 
 async function fetchAllReplies(
@@ -237,8 +283,12 @@ async function attachReplies(
 export interface CommentChunkOutcome {
   comments: CommentItem[];
   mode: "authenticated" | "anonymous" | "none";
-  /** Cursor para pedir la siguiente tanda, o null si ya no hay más comentarios. */
+  /**
+   * Cursor para pedir la siguiente tanda, o null si ya no hay más comentarios. Si hubo un error
+   * pasajero, apunta a la página que falló para que se pueda reintentar.
+   */
   nextCursor: string | null;
+  reportedCount?: number | null;
   error?: string;
 }
 
@@ -261,8 +311,9 @@ export async function fetchCommentsChunk(
 
   if (session) {
     const collected: PrivateApiComment[] = [];
-    let minId: string | undefined = cursor ?? undefined;
-    let nextCursor: string | null = cursor;
+    let pageCursor = decodeCursor(cursor);
+    let reportedCount: number | null = null;
+    const nextCursor = () => (pageCursor ? encodeCursor(pageCursor) : null);
     try {
       while (Date.now() + PAGE_SAFETY_MS < deadlineMs) {
         const page = await fetchCommentsPageAuthenticated(
@@ -270,28 +321,28 @@ export async function fetchCommentsChunk(
           mediaId,
           session.cookie,
           session.csrfToken,
-          minId
+          pageCursor
         );
+        reportedCount = page.reportedCount ?? reportedCount;
         collected.push(...(await attachReplies(shortcode, mediaId, page.comments, session, deadlineMs)));
-        nextCursor = page.hasMore && page.nextMinId ? page.nextMinId : null;
-        if (!nextCursor) break;
-        minId = nextCursor;
+        pageCursor = page.cursor;
+        if (!encodeCursor(pageCursor)) break;
       }
 
-      return { mode: "authenticated", comments: mapComments(videoUrl, shortcode, collected), nextCursor };
-    } catch (err) {
-      if (err instanceof InstagramAuthRequiredError) {
-        return {
-          mode: "authenticated",
-          comments: mapComments(videoUrl, shortcode, collected),
-          nextCursor: null,
-          error: err.message,
-        };
-      }
       return {
         mode: "authenticated",
         comments: mapComments(videoUrl, shortcode, collected),
-        nextCursor: null,
+        nextCursor: nextCursor(),
+        reportedCount,
+      };
+    } catch (err) {
+      const isAuth = err instanceof InstagramAuthRequiredError;
+      return {
+        mode: "authenticated",
+        comments: mapComments(videoUrl, shortcode, collected),
+        // Un error pasajero deja el cursor en la página que falló para reintentarla.
+        nextCursor: isAuth ? null : (nextCursor() ?? cursor),
+        reportedCount,
         error: err instanceof Error ? err.message : "Error desconocido al paginar comentarios.",
       };
     }
