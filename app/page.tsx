@@ -4,6 +4,7 @@ import { useMemo, useState } from "react";
 import type {
   AiInsights,
   AnalyzeResponse,
+  CommentsChunkResponse,
   CommentAnalysis,
   CustomFilter,
   ScrapeResult,
@@ -20,6 +21,10 @@ const SENTIMENT_FILTER_OPTIONS: { value: SentimentFilter; label: string }[] = [
   { value: "negative", label: "Negativos" },
   { value: "neutral", label: "Neutrales" },
 ];
+
+const MAX_URLS = 10;
+// Tope de seguridad por video para no quedar en un bucle infinito si Instagram repite el cursor.
+const MAX_COMMENTS_PER_VIDEO = 20_000;
 
 const SENTIMENT_PLURAL_LABELS: Record<Sentiment, string> = {
   positive: "Positivos",
@@ -158,6 +163,7 @@ function IconInbox() {
 export default function Home() {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
+  const [progress, setProgress] = useState<{ video: number; videos: number; fetched: number } | null>(null);
   const [pdfLoading, setPdfLoading] = useState(false);
   const [results, setResults] = useState<ScrapeResult[]>([]);
   const [requestError, setRequestError] = useState<string | null>(null);
@@ -314,6 +320,10 @@ export default function Home() {
       setRequestError("Pega al menos una URL de un reel o video de Instagram.");
       return;
     }
+    if (urls.length > MAX_URLS) {
+      setRequestError(`Máximo ${MAX_URLS} URLs por vez.`);
+      return;
+    }
 
     setLoading(true);
     setRequestError(null);
@@ -325,22 +335,48 @@ export default function Home() {
     setSentimentFilter("all");
     setTopicFilter("all");
     try {
-      const res = await fetch("/api/comments", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ urls }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        setRequestError(data.error ?? "Error al procesar la solicitud.");
-        setResults([]);
-        return;
+      const collected: ScrapeResult[] = [];
+      for (const [index, url] of urls.entries()) {
+        const result: ScrapeResult = { url, shortcode: null, ok: false, mode: "none", comments: [] };
+        const seen = new Set<string>();
+        let cursor: string | null = null;
+        setProgress({ video: index + 1, videos: urls.length, fetched: 0 });
+
+        // Pide tandas hasta que Instagram indique que no hay más comentarios.
+        do {
+          const res = await fetch("/api/comments", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ url, cursor }),
+          });
+          const data = await res.json();
+          if (!res.ok) {
+            result.error = data.error ?? "Error al procesar la solicitud.";
+            break;
+          }
+          const chunk = data as CommentsChunkResponse;
+          result.shortcode = chunk.shortcode;
+          result.mode = chunk.mode;
+          for (const c of chunk.comments) {
+            if (seen.has(c.commentId)) continue;
+            seen.add(c.commentId);
+            result.comments.push(c);
+          }
+          if (chunk.error) result.error = chunk.error;
+          // Si Instagram repite el cursor, se corta para no pedir lo mismo para siempre.
+          cursor = chunk.nextCursor && chunk.nextCursor !== cursor ? chunk.nextCursor : null;
+          setProgress({ video: index + 1, videos: urls.length, fetched: result.comments.length });
+        } while (cursor && !result.error && result.comments.length < MAX_COMMENTS_PER_VIDEO);
+
+        result.ok = result.comments.length > 0;
+        collected.push(result);
       }
-      setResults(data.results as ScrapeResult[]);
+      setResults(collected);
     } catch (err) {
       setRequestError(err instanceof Error ? err.message : "Error de red.");
     } finally {
       setLoading(false);
+      setProgress(null);
     }
   }
 
@@ -418,7 +454,11 @@ export default function Home() {
         <div className="actions">
           <button className="btn-primary" onClick={handleSubmit} disabled={loading}>
             {loading && <span className="spinner" />}
-            {loading ? "Obteniendo comentarios…" : "Obtener comentarios"}
+            {loading
+              ? progress
+                ? `Obteniendo comentarios… ${progress.fetched}${progress.videos > 1 ? ` (video ${progress.video} de ${progress.videos})` : ""}`
+                : "Obteniendo comentarios…"
+              : "Obtener comentarios"}
           </button>
           <button
             className="btn-secondary"

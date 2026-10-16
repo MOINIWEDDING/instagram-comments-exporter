@@ -234,26 +234,37 @@ async function attachReplies(
   return result;
 }
 
-export interface CommentFetchOutcome {
+export interface CommentChunkOutcome {
   comments: CommentItem[];
   mode: "authenticated" | "anonymous" | "none";
+  /** Cursor para pedir la siguiente tanda, o null si ya no hay más comentarios. */
+  nextCursor: string | null;
   error?: string;
 }
 
-export async function fetchCommentsForShortcode(
+// Margen para no empezar una página nueva cuando queda poco tiempo antes del corte del servidor.
+const PAGE_SAFETY_MS = 8_000;
+
+/**
+ * Trae una tanda de comentarios (con sus respuestas) empezando en `cursor`, hasta agotar el tiempo
+ * disponible. Si quedan más, devuelve `nextCursor` para continuar en otro pedido: así se pueden
+ * leer publicaciones con miles de comentarios sin chocar con el límite de tiempo de Vercel.
+ */
+export async function fetchCommentsChunk(
   videoUrl: string,
   shortcode: string,
-  maxComments: number,
+  cursor: string | null,
   deadlineMs: number
-): Promise<CommentFetchOutcome> {
+): Promise<CommentChunkOutcome> {
   const mediaId = shortcodeToMediaId(shortcode);
   const session = buildSession();
 
   if (session) {
     const collected: PrivateApiComment[] = [];
-    let minId: string | undefined = undefined;
+    let minId: string | undefined = cursor ?? undefined;
+    let nextCursor: string | null = cursor;
     try {
-      while (collected.length < maxComments && Date.now() < deadlineMs) {
+      while (Date.now() + PAGE_SAFETY_MS < deadlineMs) {
         const page = await fetchCommentsPageAuthenticated(
           shortcode,
           mediaId,
@@ -261,37 +272,41 @@ export async function fetchCommentsForShortcode(
           session.csrfToken,
           minId
         );
-        collected.push(...page.comments);
-        if (!page.hasMore || !page.nextMinId) break;
-        minId = page.nextMinId;
+        collected.push(...(await attachReplies(shortcode, mediaId, page.comments, session, deadlineMs)));
+        nextCursor = page.hasMore && page.nextMinId ? page.nextMinId : null;
+        if (!nextCursor) break;
+        minId = nextCursor;
       }
 
-      const withReplies = await attachReplies(shortcode, mediaId, collected, session, deadlineMs);
-
-      return {
-        mode: "authenticated",
-        comments: mapComments(videoUrl, shortcode, withReplies.slice(0, maxComments * 4)),
-      };
+      return { mode: "authenticated", comments: mapComments(videoUrl, shortcode, collected), nextCursor };
     } catch (err) {
       if (err instanceof InstagramAuthRequiredError) {
-        return { mode: "authenticated", comments: [], error: err.message };
+        return {
+          mode: "authenticated",
+          comments: mapComments(videoUrl, shortcode, collected),
+          nextCursor: null,
+          error: err.message,
+        };
       }
       return {
         mode: "authenticated",
-        comments: mapComments(videoUrl, shortcode, collected.slice(0, maxComments)),
+        comments: mapComments(videoUrl, shortcode, collected),
+        nextCursor: null,
         error: err instanceof Error ? err.message : "Error desconocido al paginar comentarios.",
       };
     }
   }
 
-  const anonymous = await fetchAnonymous(shortcode);
+  // Sin sesión solo hay un intento best-effort, sin paginación.
+  const anonymous = cursor ? null : await fetchAnonymous(shortcode);
   if (anonymous && anonymous.length > 0) {
-    return { mode: "anonymous", comments: mapComments(videoUrl, shortcode, anonymous) };
+    return { mode: "anonymous", comments: mapComments(videoUrl, shortcode, anonymous), nextCursor: null };
   }
 
   return {
     mode: "none",
     comments: [],
+    nextCursor: null,
     error:
       "No se pudo leer comentarios sin sesión autenticada. Configura IG_SESSIONID (y opcionalmente IG_DS_USER_ID / IG_CSRFTOKEN) en las variables de entorno.",
   };

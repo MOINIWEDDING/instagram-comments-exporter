@@ -74,9 +74,9 @@ la primera vez (`npx vercel login`) y vincular el proyecto (`npx vercel link`).
   usando la cookie de sesión configurada. Para cada comentario con más respuestas de las que trae
   el preview, pagina también `.../comments/{id}/child_comments/` para traerlas todas. Si no hay
   sesión configurada, intenta un modo anónimo best-effort que rara vez trae resultados completos.
-- `app/api/comments/route.ts`: recibe hasta 10 URLs por solicitud, hasta 300 comentarios de primer
-  nivel por video (las respuestas se suman aparte), con un presupuesto de tiempo de ~50s para no
-  exceder el límite de función serverless.
+- `app/api/comments/route.ts`: trae una tanda de comentarios de un video (~50s por pedido, para no
+  exceder el límite de función serverless) y devuelve un cursor; la app sigue pidiendo tandas hasta
+  traer todos los comentarios, sin tope por video.
 - `app/page.tsx`: UI para pegar URLs, ver el dashboard de resultados (respuestas indentadas y
   marcadas con un ícono), analizar/filtrar los comentarios y exportarlos.
 - `lib/export.ts`: generación del CSV y del PDF.
@@ -106,8 +106,10 @@ bastante menos preciso.
 
 ## Límites conocidos
 
-- Máximo 10 URLs y 300 comentarios por video por solicitud (ajustable en
-  `app/api/comments/route.ts`).
+- Máximo 10 URLs por vez. No hay tope de comentarios por video (salvo uno de seguridad de 20.000),
+  pero publicaciones muy grandes tardan más porque se leen en tandas.
+- El contador que muestra Instagram suele ser algo mayor que lo que se puede leer: no incluye la
+  diferencia de comentarios ocultos, filtrados como spam o borrados.
 - Los reels/videos privados nunca serán accesibles salvo que la cuenta autenticada los siga y
   tenga permiso.
 - Instagram puede exigir verificación (challenge) a la sesión si detecta actividad inusual; en ese

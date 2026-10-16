@@ -1,67 +1,52 @@
 import { NextRequest, NextResponse } from "next/server";
-import { extractShortcode, fetchCommentsForShortcode } from "@/lib/instagram";
-import type { ScrapeResult } from "@/lib/types";
+import { extractShortcode, fetchCommentsChunk } from "@/lib/instagram";
+import type { CommentsChunkResponse } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
-const MAX_URLS_PER_REQUEST = 10;
-const MAX_COMMENTS_PER_VIDEO = 300;
+// Cada pedido trae una tanda de comentarios de un video; la app vuelve a llamar con `cursor`
+// hasta que `nextCursor` sea null. Así no hay tope de comentarios por video.
 const TIME_BUDGET_MS = 50_000;
 
 export async function POST(req: NextRequest) {
-  let body: { urls?: unknown };
+  let body: { url?: unknown; cursor?: unknown };
   try {
     body = await req.json();
   } catch {
     return NextResponse.json({ error: "Body inválido, se esperaba JSON." }, { status: 400 });
   }
 
-  const urls = Array.isArray(body.urls)
-    ? body.urls.filter((u): u is string => typeof u === "string" && u.trim().length > 0)
-    : [];
-
-  if (urls.length === 0) {
-    return NextResponse.json({ error: "Envía al menos una URL en 'urls'." }, { status: 400 });
-  }
-  if (urls.length > MAX_URLS_PER_REQUEST) {
-    return NextResponse.json(
-      { error: `Máximo ${MAX_URLS_PER_REQUEST} URLs por solicitud.` },
-      { status: 400 }
-    );
+  const url = typeof body.url === "string" ? body.url.trim() : "";
+  const cursor = typeof body.cursor === "string" && body.cursor ? body.cursor : null;
+  if (!url) {
+    return NextResponse.json({ error: "Envía la URL del video en 'url'." }, { status: 400 });
   }
 
-  const deadline = Date.now() + TIME_BUDGET_MS;
-  const results: ScrapeResult[] = [];
-
-  for (const url of urls) {
-    const shortcode = extractShortcode(url);
-    if (!shortcode) {
-      results.push({ url, shortcode: null, ok: false, mode: "none", error: "URL de Instagram inválida.", comments: [] });
-      continue;
-    }
-
-    try {
-      const outcome = await fetchCommentsForShortcode(url, shortcode, MAX_COMMENTS_PER_VIDEO, deadline);
-      results.push({
-        url,
-        shortcode,
-        ok: outcome.comments.length > 0,
-        mode: outcome.mode,
-        error: outcome.error,
-        comments: outcome.comments,
-      });
-    } catch (err) {
-      results.push({
-        url,
-        shortcode,
-        ok: false,
-        mode: "none",
-        error: err instanceof Error ? err.message : "Error desconocido.",
-        comments: [],
-      });
-    }
+  const shortcode = extractShortcode(url);
+  if (!shortcode) {
+    const response: CommentsChunkResponse = {
+      shortcode: null,
+      mode: "none",
+      comments: [],
+      nextCursor: null,
+      error: "URL de Instagram inválida.",
+    };
+    return NextResponse.json(response);
   }
 
-  return NextResponse.json({ results });
+  try {
+    const outcome = await fetchCommentsChunk(url, shortcode, cursor, Date.now() + TIME_BUDGET_MS);
+    const response: CommentsChunkResponse = { shortcode, ...outcome };
+    return NextResponse.json(response);
+  } catch (err) {
+    const response: CommentsChunkResponse = {
+      shortcode,
+      mode: "none",
+      comments: [],
+      nextCursor: null,
+      error: err instanceof Error ? err.message : "Error desconocido.",
+    };
+    return NextResponse.json(response);
+  }
 }

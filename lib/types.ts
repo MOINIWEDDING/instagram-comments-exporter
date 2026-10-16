@@ -18,6 +18,15 @@ export interface ScrapeResult {
   comments: CommentItem[];
 }
 
+/** Una tanda de comentarios de un video (ver /api/comments). */
+export interface CommentsChunkResponse {
+  shortcode: string | null;
+  mode: ScrapeResult["mode"];
+  comments: CommentItem[];
+  nextCursor: string | null;
+  error?: string;
+}
+
 export type Sentiment = "positive" | "negative" | "neutral";
 
 /** Filtro temático definido por el usuario, p. ej. "Precio" → "preguntan cuánto cuesta". */
