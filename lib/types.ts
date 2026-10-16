@@ -18,6 +18,9 @@ export interface ScrapeResult {
   comments: CommentItem[];
   /** Total de comentarios que informa Instagram para la publicación (incluye ocultos y borrados). */
   reportedCount?: number | null;
+  /** Comentarios principales leídos y respuestas que Instagram dice que tienen. */
+  topLevelCount?: number;
+  expectedReplies?: number;
 }
 
 /** Una tanda de comentarios de un video (ver /api/comments). */
@@ -27,6 +30,19 @@ export interface CommentsChunkResponse {
   comments: CommentItem[];
   nextCursor: string | null;
   reportedCount?: number | null;
+  pendingReplies?: string[];
+  topLevelCount?: number;
+  expectedReplies?: number;
+  error?: string;
+}
+
+/** Respuestas de varios comentarios (ver /api/comments con `replyParents`). */
+export interface RepliesChunkResponse {
+  comments: CommentItem[];
+  /** Empezados pero sin terminar: se reintentan (con tope de intentos). */
+  unfinished: string[];
+  /** No se llegaron a empezar por tiempo: se vuelven a pedir sin contar como intento. */
+  skipped: string[];
   error?: string;
 }
 

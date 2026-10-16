@@ -4,7 +4,9 @@ import { useMemo, useState } from "react";
 import type {
   AiInsights,
   AnalyzeResponse,
+  CommentItem,
   CommentsChunkResponse,
+  RepliesChunkResponse,
   CommentAnalysis,
   CustomFilter,
   ScrapeResult,
@@ -25,6 +27,34 @@ const SENTIMENT_FILTER_OPTIONS: { value: SentimentFilter; label: string }[] = [
 const MAX_URLS = 10;
 // Tope de seguridad por video para no quedar en un bucle infinito si Instagram repite el cursor.
 const MAX_COMMENTS_PER_VIDEO = 20_000;
+
+const REPLY_PARENTS_PER_REQUEST = 40;
+
+/** Ordena para que cada respuesta quede debajo de su comentario, como en Instagram. */
+function groupReplies(comments: CommentItem[]): CommentItem[] {
+  const byParent = new Map<string, CommentItem[]>();
+  const topLevel: CommentItem[] = [];
+  for (const c of comments) {
+    if (c.parentCommentId) {
+      const list = byParent.get(c.parentCommentId) ?? [];
+      list.push(c);
+      byParent.set(c.parentCommentId, list);
+    } else {
+      topLevel.push(c);
+    }
+  }
+  const out: CommentItem[] = [];
+  for (const c of topLevel) {
+    out.push(c);
+    const replies = byParent.get(c.commentId);
+    if (replies) {
+      out.push(...replies.sort((a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0)));
+      byParent.delete(c.commentId);
+    }
+  }
+  for (const orphans of byParent.values()) out.push(...orphans);
+  return out;
+}
 
 const SENTIMENT_PLURAL_LABELS: Record<Sentiment, string> = {
   positive: "Positivos",
@@ -341,6 +371,16 @@ export default function Home() {
         const seen = new Set<string>();
         let cursor: string | null = null;
         let retries = 0;
+        const pendingParents: string[] = [];
+        let topLevelCount = 0;
+        let expectedReplies = 0;
+        const addComments = (comments: CommentItem[]) => {
+          for (const c of comments) {
+            if (seen.has(c.commentId)) continue;
+            seen.add(c.commentId);
+            result.comments.push(c);
+          }
+        };
         setProgress({ video: index + 1, videos: urls.length, fetched: 0 });
 
         // Pide tandas hasta que Instagram indique que no hay más comentarios.
@@ -358,11 +398,10 @@ export default function Home() {
           const chunk = data as CommentsChunkResponse;
           result.shortcode = chunk.shortcode;
           result.mode = chunk.mode;
-          for (const c of chunk.comments) {
-            if (seen.has(c.commentId)) continue;
-            seen.add(c.commentId);
-            result.comments.push(c);
-          }
+          addComments(chunk.comments);
+          pendingParents.push(...(chunk.pendingReplies ?? []));
+          topLevelCount += chunk.topLevelCount ?? 0;
+          expectedReplies += chunk.expectedReplies ?? 0;
           if (chunk.reportedCount != null) result.reportedCount = chunk.reportedCount;
           setProgress({ video: index + 1, videos: urls.length, fetched: result.comments.length });
 
@@ -379,6 +418,41 @@ export default function Home() {
           retries = 0;
         } while (cursor && !result.error && result.comments.length < MAX_COMMENTS_PER_VIDEO);
 
+        // Segunda fase: respuestas de los comentarios que tienen más de las que vienen de vista previa.
+        const attempts = new Map<string, number>();
+        let queue = [...new Set(pendingParents)];
+        let stalls = 0;
+        while (queue.length > 0 && !result.error && stalls < 3) {
+          const parents = queue.slice(0, REPLY_PARENTS_PER_REQUEST);
+          queue = queue.slice(REPLY_PARENTS_PER_REQUEST);
+          const res = await fetch("/api/comments", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ url, replyParents: parents }),
+          });
+          const data = (await res.json()) as RepliesChunkResponse;
+          const before = result.comments.length;
+          addComments(data.comments ?? []);
+          const skipped = data.skipped ?? [];
+          // Si un pedido no avanzó nada varias veces seguidas, se corta para no quedar en un bucle.
+          stalls = result.comments.length > before || skipped.length < parents.length ? 0 : stalls + 1;
+          queue.unshift(...skipped);
+          setProgress({ video: index + 1, videos: urls.length, fetched: result.comments.length });
+          // Lo que quedó sin terminar (por tiempo o error pasajero) se reintenta hasta 3 veces.
+          const retry = (data.unfinished ?? []).filter((id) => {
+            const n = (attempts.get(id) ?? 0) + 1;
+            attempts.set(id, n);
+            return n <= 3;
+          });
+          if (retry.length > 0) {
+            if (data.error) await new Promise((resolve) => setTimeout(resolve, 4_000));
+            queue.push(...retry);
+          }
+        }
+
+        result.comments = groupReplies(result.comments);
+        result.topLevelCount = topLevelCount;
+        result.expectedReplies = expectedReplies;
         result.ok = result.comments.length > 0;
         collected.push(result);
       }
@@ -757,6 +831,20 @@ export default function Home() {
                   <span>{result.error}</span>
                 </div>
               )}
+              {(() => {
+                const full = results[index];
+                if (!full.reportedCount || full.reportedCount <= full.comments.length) return null;
+                const replies = full.comments.filter((c) => c.parentCommentId).length;
+                const topLevel = full.comments.length - replies;
+                return (
+                  <p className="count-detail">
+                    Leídos: {topLevel} comentarios principales y {replies}
+                    {full.expectedReplies ? ` de ${full.expectedReplies}` : ""} respuestas. Instagram informa{" "}
+                    {full.reportedCount} en total; la diferencia suele ser de comentarios ocultos por
+                    Instagram (spam u ofensivos), borrados o de cuentas restringidas, que no se pueden leer.
+                  </p>
+                );
+              })()}
               {result.ok && result.comments.length === 0 && (
                 <p className="filter-empty">Ningún comentario de este video coincide con los filtros.</p>
               )}

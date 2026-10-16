@@ -178,6 +178,11 @@ async function fetchCommentsPageAuthenticated(
   return { comments, cursor: next, reportedCount };
 }
 
+/**
+ * Trae todas las respuestas de un comentario. Igual que los comentarios, las respuestas se
+ * paginan en dos direcciones (más antiguas con `max_id` y más nuevas con `min_id`); se recorren
+ * ambas. `complete` es false si se cortó por tiempo y hay que volver a pedirlas.
+ */
 async function fetchAllReplies(
   shortcode: string,
   mediaId: string,
@@ -185,27 +190,92 @@ async function fetchAllReplies(
   cookie: string,
   csrfToken: string,
   deadlineMs: number
-): Promise<PrivateApiComment[]> {
+): Promise<{ replies: PrivateApiComment[]; complete: boolean }> {
   const collected: PrivateApiComment[] = [];
-  let cursor: string | undefined;
+  let tail: string | null = null;
+  let head: string | null = null;
+  let first = true;
 
-  while (Date.now() < deadlineMs) {
+  while (first || tail || head) {
+    if (Date.now() + 3_000 > deadlineMs) return { replies: collected, complete: false };
     const url = new URL(
       `https://www.instagram.com/api/v1/media/${mediaId}/comments/${commentId}/child_comments/`
     );
-    if (cursor) url.searchParams.set("max_id", cursor);
+    const direction = first ? "first" : tail ? "tail" : "head";
+    if (direction === "tail") url.searchParams.set("max_id", tail!);
+    if (direction === "head") url.searchParams.set("min_id", head!);
 
     const data = await igApiFetch(url.toString(), shortcode, cookie, csrfToken);
-    const children: PrivateApiComment[] = data.child_comments ?? [];
-    collected.push(...children);
+    collected.push(...((data.child_comments ?? []) as PrivateApiComment[]));
 
-    const hasMore = Boolean(data.has_more_tail_child_comments);
-    const nextCursor: string | undefined = data.next_max_child_cursor;
-    if (!hasMore || !nextCursor) break;
-    cursor = nextCursor;
+    const nextTail = data.has_more_tail_child_comments && data.next_max_child_cursor ? String(data.next_max_child_cursor) : null;
+    const nextHead = data.has_more_head_child_comments && data.next_min_child_cursor ? String(data.next_min_child_cursor) : null;
+    if (direction === "first") {
+      tail = nextTail;
+      head = nextHead;
+    } else if (direction === "tail") {
+      tail = nextTail;
+    } else {
+      head = nextHead;
+    }
+    first = false;
   }
 
-  return collected;
+  return { replies: collected, complete: true };
+}
+
+export interface RepliesOutcome {
+  comments: CommentItem[];
+  /** Comentarios cuyas respuestas se empezaron a leer pero no se terminaron (tiempo o error pasajero). */
+  unfinished: string[];
+  /** Comentarios que no se llegaron a empezar por falta de tiempo. */
+  skipped: string[];
+  error?: string;
+}
+
+/** Trae las respuestas completas de varios comentarios, hasta agotar el tiempo disponible. */
+export async function fetchRepliesForParents(
+  videoUrl: string,
+  shortcode: string,
+  parentIds: string[],
+  deadlineMs: number
+): Promise<RepliesOutcome> {
+  const session = buildSession();
+  if (!session) {
+    return { comments: [], unfinished: [], skipped: [], error: "Falta IG_SESSIONID para leer respuestas." };
+  }
+  const mediaId = shortcodeToMediaId(shortcode);
+  const collected: PrivateApiComment[] = [];
+  const unfinished: string[] = [];
+  const skipped: string[] = [];
+  let error: string | undefined;
+
+  for (const [i, parentId] of parentIds.entries()) {
+    if (Date.now() + 4_000 > deadlineMs) {
+      skipped.push(...parentIds.slice(i));
+      break;
+    }
+    try {
+      const { replies, complete } = await fetchAllReplies(
+        shortcode,
+        mediaId,
+        parentId,
+        session.cookie,
+        session.csrfToken,
+        deadlineMs
+      );
+      collected.push(...replies.map((r) => ({ ...r, parent_comment_id: r.parent_comment_id ?? parentId })));
+      if (!complete) unfinished.push(parentId);
+    } catch (err) {
+      if (err instanceof InstagramAuthRequiredError) {
+        return { comments: mapComments(videoUrl, shortcode, collected), unfinished: [], skipped: [], error: err.message };
+      }
+      error = err instanceof Error ? err.message : "Error al leer respuestas.";
+      unfinished.push(parentId);
+    }
+  }
+
+  return { comments: mapComments(videoUrl, shortcode, collected), unfinished, skipped, error };
 }
 
 async function fetchAnonymous(shortcode: string): Promise<PrivateApiComment[] | null> {
@@ -241,43 +311,30 @@ async function fetchAnonymous(shortcode: string): Promise<PrivateApiComment[] | 
   }
 }
 
-async function attachReplies(
-  shortcode: string,
-  mediaId: string,
-  topLevel: PrivateApiComment[],
-  session: { cookie: string; csrfToken: string },
-  deadlineMs: number
-): Promise<PrivateApiComment[]> {
-  const result: PrivateApiComment[] = [];
-
+/**
+ * Agrega a cada comentario las respuestas de vista previa que ya vienen en la página, y anota
+ * cuáles tienen más respuestas para pedirlas aparte (ver fetchRepliesForParents).
+ */
+function withPreviewReplies(topLevel: PrivateApiComment[]): {
+  comments: PrivateApiComment[];
+  pendingReplies: string[];
+  expectedReplies: number;
+} {
+  const comments: PrivateApiComment[] = [];
+  const pendingReplies: string[] = [];
+  let expectedReplies = 0;
   for (const comment of topLevel) {
-    result.push(comment);
-
-    const previewReplies = comment.preview_child_comments ?? [];
+    comments.push(comment);
+    const preview = (comment.preview_child_comments ?? []).map((r) => ({
+      ...r,
+      parent_comment_id: r.parent_comment_id ?? comment.pk,
+    }));
+    comments.push(...preview);
     const childCount = comment.child_comment_count ?? 0;
-    if (childCount === 0) continue;
-
-    if (childCount > previewReplies.length && Date.now() < deadlineMs) {
-      try {
-        const fullReplies = await fetchAllReplies(
-          shortcode,
-          mediaId,
-          String(comment.pk),
-          session.cookie,
-          session.csrfToken,
-          deadlineMs
-        );
-        result.push(...(fullReplies.length > 0 ? fullReplies : previewReplies));
-        continue;
-      } catch {
-        // Fall through to preview replies below.
-      }
-    }
-
-    result.push(...previewReplies);
+    expectedReplies += childCount;
+    if (childCount > preview.length) pendingReplies.push(String(comment.pk));
   }
-
-  return result;
+  return { comments, pendingReplies, expectedReplies };
 }
 
 export interface CommentChunkOutcome {
@@ -289,6 +346,11 @@ export interface CommentChunkOutcome {
    */
   nextCursor: string | null;
   reportedCount?: number | null;
+  /** Comentarios principales de esta tanda con respuestas que hay que pedir aparte. */
+  pendingReplies?: string[];
+  /** Cantidad de comentarios principales y de respuestas que informa Instagram en esta tanda. */
+  topLevelCount?: number;
+  expectedReplies?: number;
   error?: string;
 }
 
@@ -313,6 +375,9 @@ export async function fetchCommentsChunk(
     const collected: PrivateApiComment[] = [];
     let pageCursor = decodeCursor(cursor);
     let reportedCount: number | null = null;
+    const pendingReplies: string[] = [];
+    let topLevelCount = 0;
+    let expectedReplies = 0;
     const nextCursor = () => (pageCursor ? encodeCursor(pageCursor) : null);
     try {
       while (Date.now() + PAGE_SAFETY_MS < deadlineMs) {
@@ -324,7 +389,11 @@ export async function fetchCommentsChunk(
           pageCursor
         );
         reportedCount = page.reportedCount ?? reportedCount;
-        collected.push(...(await attachReplies(shortcode, mediaId, page.comments, session, deadlineMs)));
+        const withPreview = withPreviewReplies(page.comments);
+        collected.push(...withPreview.comments);
+        pendingReplies.push(...withPreview.pendingReplies);
+        topLevelCount += page.comments.length;
+        expectedReplies += withPreview.expectedReplies;
         pageCursor = page.cursor;
         if (!encodeCursor(pageCursor)) break;
       }
@@ -334,6 +403,9 @@ export async function fetchCommentsChunk(
         comments: mapComments(videoUrl, shortcode, collected),
         nextCursor: nextCursor(),
         reportedCount,
+        pendingReplies,
+        topLevelCount,
+        expectedReplies,
       };
     } catch (err) {
       const isAuth = err instanceof InstagramAuthRequiredError;
@@ -343,6 +415,9 @@ export async function fetchCommentsChunk(
         // Un error pasajero deja el cursor en la página que falló para reintentarla.
         nextCursor: isAuth ? null : (nextCursor() ?? cursor),
         reportedCount,
+        pendingReplies,
+        topLevelCount,
+        expectedReplies,
         error: err instanceof Error ? err.message : "Error desconocido al paginar comentarios.",
       };
     }
