@@ -9,7 +9,7 @@ export async function GET(req: NextRequest) {
   // `motivo` lleva a la app el detalle del error para mostrarlo.
   const back = (status: string, motivo?: string) => {
     const url = new URL(`/?cuenta=${status}`, req.url);
-    if (motivo) url.searchParams.set("motivo", motivo.slice(0, 400));
+    if (motivo) url.searchParams.set("motivo", motivo.slice(0, 900));
     const res = NextResponse.redirect(url);
     res.cookies.delete(STATE_COOKIE);
     return res;

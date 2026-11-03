@@ -137,54 +137,94 @@ async function exchangeFacebookToken(token: string, appId: string, appSecret: st
 }
 
 /** Facebook: busca la cuenta de Instagram profesional vinculada a alguna página del usuario. */
+/**
+ * Facebook: busca la cuenta de Instagram profesional a la que da acceso el token. Según cómo se
+ * configuró el inicio de sesión, Meta la expone en lugares distintos, así que se prueban varios:
+ * 1. Las páginas del usuario (/me/accounts) con su instagram_business_account.
+ * 2. Los activos autorizados en el token (debug_token → granular_scopes): ids de Instagram, o
+ *    ids de páginas cuya cuenta de Instagram vinculada se consulta.
+ * 3. Los portfolios empresariales del usuario (inicio de sesión unificado con activos de empresa).
+ * Si nada funciona, el error resume lo que devolvió cada intento, para poder diagnosticarlo.
+ */
 async function findInstagramAccount(token: string, appId: string, appSecret: string): Promise<string> {
-  let pagesError: unknown = null;
-  // Para el mensaje de error: qué páginas ve la app y qué permisos se concedieron.
-  let pageNames: string[] = [];
-  let grantedScopes: string[] = [];
+  const notes: string[] = [];
+  const errorText = (err: unknown) => (err instanceof Error ? err.message : String(err)).slice(0, 120);
+
+  // 1. Páginas
   try {
     const data = await graphGet("facebook", "/me/accounts", token, {
-      fields: "id,name,instagram_business_account",
+      fields: "id,name,instagram_business_account,connected_instagram_account",
       limit: "100",
     });
-    const page = (data.data ?? []).find((p: any) => p.instagram_business_account?.id);
-    if (page) return String(page.instagram_business_account.id);
-    pageNames = (data.data ?? []).map((p: any) => String(p.name ?? p.id));
+    const pages: any[] = data.data ?? [];
+    const page = pages.find((p) => p.instagram_business_account?.id || p.connected_instagram_account?.id);
+    if (page) return String(page.instagram_business_account?.id ?? page.connected_instagram_account.id);
+    notes.push(
+      pages.length === 0
+        ? "páginas: ninguna compartida"
+        : `páginas sin Instagram vinculado: ${pages.slice(0, 5).map((p) => p.name ?? p.id).join(", ")}`
+    );
   } catch (err) {
-    pagesError = err;
+    notes.push(`páginas: error (${errorText(err)})`);
   }
 
-  // Respaldo: con Facebook Login for Business, el token indica a qué cuentas de Instagram se dio
-  // permiso (granular_scopes de instagram_basic / instagram_manage_comments).
+  // 2. Activos autorizados en el token
+  let granted: string[] = [];
   try {
     const debug = await graphGet("facebook", "/debug_token", `${appId}|${appSecret}`, { input_token: token });
-    const scopes: { scope: string; target_ids?: string[] }[] = debug.data?.granular_scopes ?? [];
-    const igScope = scopes.find(
-      (s) => (s.scope === "instagram_basic" || s.scope === "instagram_manage_comments") && s.target_ids?.length
+    const info = debug.data ?? {};
+    granted = info.scopes ?? [];
+    const scopes: { scope: string; target_ids?: string[] }[] = info.granular_scopes ?? [];
+    notes.push(`tipo de token: ${info.type ?? "?"}`);
+    notes.push(
+      `permisos: ${scopes.map((s) => `${s.scope}${s.target_ids?.length ? `(${s.target_ids.length} activos)` : ""}`).join(", ") || granted.join(", ") || "ninguno"}`
     );
-    if (igScope?.target_ids?.[0]) return String(igScope.target_ids[0]);
-    const granted: string[] = debug.data?.scopes ?? [];
-    grantedScopes = granted;
-    const missing = ["instagram_basic", "instagram_manage_comments"].filter((s) => !granted.includes(s));
-    if (missing.length > 0) {
-      throw new IgGraphError(
-        `El permiso de conexión no incluye ${missing.join(" ni ")}. Agregalo a la configuración de "Inicio de sesión con Facebook para empresas" en Meta y volvé a conectar.`,
-        400,
-        -1
-      );
+
+    const igTarget = scopes.find((s) => s.scope.startsWith("instagram_") && s.target_ids?.length)?.target_ids?.[0];
+    if (igTarget) return String(igTarget);
+
+    // Ids de páginas autorizadas: se busca la cuenta de Instagram vinculada a cada una.
+    const pageIds = [...new Set(scopes.filter((s) => s.scope.startsWith("pages_")).flatMap((s) => s.target_ids ?? []))];
+    for (const pageId of pageIds.slice(0, 10)) {
+      try {
+        const page = await graphGet("facebook", `/${pageId}`, token, {
+          fields: "instagram_business_account,connected_instagram_account",
+        });
+        const igId = page.instagram_business_account?.id ?? page.connected_instagram_account?.id;
+        if (igId) return String(igId);
+      } catch {
+        // Se sigue con la siguiente página.
+      }
     }
   } catch (err) {
-    if (err instanceof IgGraphError && err.code === -1) throw err;
-    pagesError ??= err;
+    notes.push(`activos del token: error (${errorText(err)})`);
   }
 
-  if (pagesError) throw pagesError;
-  const pagesDetail =
-    pageNames.length === 0
-      ? "Facebook no compartió ninguna página con la app"
-      : `Páginas compartidas sin Instagram vinculado: ${pageNames.slice(0, 5).join(", ")}`;
+  // 3. Portfolios empresariales
+  try {
+    const data = await graphGet("facebook", "/me/businesses", token, {
+      fields: "id,name,instagram_business_accounts{id,username},owned_instagram_accounts{id,username}",
+      limit: "25",
+    });
+    for (const business of data.data ?? []) {
+      const ig = business.instagram_business_accounts?.data?.[0] ?? business.owned_instagram_accounts?.data?.[0];
+      if (ig?.id) return String(ig.id);
+    }
+    notes.push(`portfolios: ${(data.data ?? []).length} sin cuenta de Instagram`);
+  } catch (err) {
+    notes.push(`portfolios: error (${errorText(err)})`);
+  }
+
+  const missing = ["instagram_basic", "instagram_manage_comments"].filter((s) => granted.length > 0 && !granted.includes(s));
+  if (missing.length > 0) {
+    throw new IgGraphError(
+      `El permiso de conexión no incluye ${missing.join(" ni ")}. Agregalo a la configuración del inicio de sesión en Meta y volvé a conectar.`,
+      400,
+      -1
+    );
+  }
   throw new IgGraphError(
-    `No se encontró una cuenta de Instagram profesional vinculada a tus páginas de Facebook. ${pagesDetail}. Permisos concedidos: ${grantedScopes.join(", ") || "ninguno"}. Vinculá tu Instagram a una página y, al conectar, elegí esa página y esa cuenta.`,
+    `No se encontró la cuenta de Instagram autorizada. Al conectar, marcá tu cuenta de Instagram en el paso de activos. Detalle: ${notes.join(" · ")}`,
     400,
     -1
   );
