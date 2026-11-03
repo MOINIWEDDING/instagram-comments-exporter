@@ -313,7 +313,9 @@ export default function Home() {
     const notice = params.get("cuenta");
     if (notice) {
       setSource("account");
-      setAccountNotice(ACCOUNT_NOTICES[notice] ?? null);
+      const base = ACCOUNT_NOTICES[notice] ?? null;
+      const motivo = params.get("motivo");
+      setAccountNotice(base && motivo ? { ...base, text: `${base.text} Motivo: ${motivo}` } : base);
       window.history.replaceState(null, "", window.location.pathname);
     }
     void loadAccount();

@@ -106,7 +106,7 @@ export async function exchangeCode(
     shortUrl.searchParams.set("code", code);
     const short = await readJson(await fetch(shortUrl, { cache: "no-store" }));
     const token = await exchangeFacebookToken(short.access_token, appId, appSecret).catch(() => short.access_token);
-    return { token, provider, igUserId: await findInstagramAccount(token) };
+    return { token, provider, igUserId: await findInstagramAccount(token, appId, appSecret) };
   }
 
   const body = new URLSearchParams({
@@ -137,20 +137,48 @@ async function exchangeFacebookToken(token: string, appId: string, appSecret: st
 }
 
 /** Facebook: busca la cuenta de Instagram profesional vinculada a alguna página del usuario. */
-async function findInstagramAccount(token: string): Promise<string> {
-  const data = await graphGet("facebook", "/me/accounts", token, {
-    fields: "id,name,instagram_business_account",
-    limit: "100",
-  });
-  const page = (data.data ?? []).find((p: any) => p.instagram_business_account?.id);
-  if (!page) {
-    throw new IgGraphError(
-      "No se encontró una cuenta de Instagram profesional vinculada a tus páginas de Facebook. Vinculá tu Instagram a una página y, al conectar, elegí esa página y esa cuenta.",
-      400,
-      -1
-    );
+async function findInstagramAccount(token: string, appId: string, appSecret: string): Promise<string> {
+  let pagesError: unknown = null;
+  try {
+    const data = await graphGet("facebook", "/me/accounts", token, {
+      fields: "id,name,instagram_business_account",
+      limit: "100",
+    });
+    const page = (data.data ?? []).find((p: any) => p.instagram_business_account?.id);
+    if (page) return String(page.instagram_business_account.id);
+  } catch (err) {
+    pagesError = err;
   }
-  return String(page.instagram_business_account.id);
+
+  // Respaldo: con Facebook Login for Business, el token indica a qué cuentas de Instagram se dio
+  // permiso (granular_scopes de instagram_basic / instagram_manage_comments).
+  try {
+    const debug = await graphGet("facebook", "/debug_token", `${appId}|${appSecret}`, { input_token: token });
+    const scopes: { scope: string; target_ids?: string[] }[] = debug.data?.granular_scopes ?? [];
+    const igScope = scopes.find(
+      (s) => (s.scope === "instagram_basic" || s.scope === "instagram_manage_comments") && s.target_ids?.length
+    );
+    if (igScope?.target_ids?.[0]) return String(igScope.target_ids[0]);
+    const granted: string[] = debug.data?.scopes ?? [];
+    const missing = ["instagram_basic", "instagram_manage_comments"].filter((s) => !granted.includes(s));
+    if (missing.length > 0) {
+      throw new IgGraphError(
+        `El permiso de conexión no incluye ${missing.join(" ni ")}. Agregalo a la configuración de "Inicio de sesión con Facebook para empresas" en Meta y volvé a conectar.`,
+        400,
+        -1
+      );
+    }
+  } catch (err) {
+    if (err instanceof IgGraphError && err.code === -1) throw err;
+    pagesError ??= err;
+  }
+
+  if (pagesError) throw pagesError;
+  throw new IgGraphError(
+    "No se encontró una cuenta de Instagram profesional vinculada a tus páginas de Facebook. Vinculá tu Instagram a una página y, al conectar, elegí esa página y esa cuenta.",
+    400,
+    -1
+  );
 }
 
 /** Renueva un token de larga duración por otros 60 días. */
@@ -312,6 +340,15 @@ export async function fetchMediaCommentsChunk(
 export function describeIgError(err: unknown): string {
   if (err instanceof IgGraphError) {
     if (err.code === -1) return err.message;
+    if (/client secret|client_secret/i.test(err.message)) {
+      return "La clave secreta de la app no es correcta: revisá INSTAGRAM_APP_SECRET en Vercel (Meta → Configuración → Básica → Clave secreta de la app).";
+    }
+    if (/redirect_uri/i.test(err.message)) {
+      return "La dirección de vuelta no coincide con la registrada en Meta: agregá https://<tu-dominio>/api/ig/callback en los URI de redireccionamiento de OAuth válidos.";
+    }
+    if (/verification code|authorization code|code has (expired|been used)/i.test(err.message)) {
+      return "El código de autorización venció o ya se usó: volvé a tocar \"Conectar mi Instagram\".";
+    }
     if (err.code === 190 || err.status === 401) {
       return "La conexión con Instagram venció o fue revocada: volvé a conectar tu cuenta.";
     }
