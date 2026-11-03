@@ -139,6 +139,9 @@ async function exchangeFacebookToken(token: string, appId: string, appSecret: st
 /** Facebook: busca la cuenta de Instagram profesional vinculada a alguna página del usuario. */
 async function findInstagramAccount(token: string, appId: string, appSecret: string): Promise<string> {
   let pagesError: unknown = null;
+  // Para el mensaje de error: qué páginas ve la app y qué permisos se concedieron.
+  let pageNames: string[] = [];
+  let grantedScopes: string[] = [];
   try {
     const data = await graphGet("facebook", "/me/accounts", token, {
       fields: "id,name,instagram_business_account",
@@ -146,6 +149,7 @@ async function findInstagramAccount(token: string, appId: string, appSecret: str
     });
     const page = (data.data ?? []).find((p: any) => p.instagram_business_account?.id);
     if (page) return String(page.instagram_business_account.id);
+    pageNames = (data.data ?? []).map((p: any) => String(p.name ?? p.id));
   } catch (err) {
     pagesError = err;
   }
@@ -160,6 +164,7 @@ async function findInstagramAccount(token: string, appId: string, appSecret: str
     );
     if (igScope?.target_ids?.[0]) return String(igScope.target_ids[0]);
     const granted: string[] = debug.data?.scopes ?? [];
+    grantedScopes = granted;
     const missing = ["instagram_basic", "instagram_manage_comments"].filter((s) => !granted.includes(s));
     if (missing.length > 0) {
       throw new IgGraphError(
@@ -174,8 +179,12 @@ async function findInstagramAccount(token: string, appId: string, appSecret: str
   }
 
   if (pagesError) throw pagesError;
+  const pagesDetail =
+    pageNames.length === 0
+      ? "Facebook no compartió ninguna página con la app"
+      : `Páginas compartidas sin Instagram vinculado: ${pageNames.slice(0, 5).join(", ")}`;
   throw new IgGraphError(
-    "No se encontró una cuenta de Instagram profesional vinculada a tus páginas de Facebook. Vinculá tu Instagram a una página y, al conectar, elegí esa página y esa cuenta.",
+    `No se encontró una cuenta de Instagram profesional vinculada a tus páginas de Facebook. ${pagesDetail}. Permisos concedidos: ${grantedScopes.join(", ") || "ninguno"}. Vinculá tu Instagram a una página y, al conectar, elegí esa página y esa cuenta.`,
     400,
     -1
   );
