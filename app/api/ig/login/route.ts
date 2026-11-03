@@ -13,7 +13,7 @@ export async function GET(req: NextRequest) {
   }
   // `state` protege contra pedidos falsificados: se compara al volver de Instagram.
   const state = randomBytes(16).toString("hex");
-  const res = NextResponse.redirect(authorizeUrl(config.appId, redirectUri(req.nextUrl.origin), state));
+  const res = NextResponse.redirect(authorizeUrl(config, redirectUri(req.nextUrl.origin), state));
   res.cookies.set(STATE_COOKIE, state, {
     httpOnly: true,
     secure: process.env.NODE_ENV === "production",

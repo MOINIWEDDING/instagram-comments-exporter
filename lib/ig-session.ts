@@ -8,8 +8,11 @@ export const STATE_COOKIE = "ig_oauth_state";
 
 export interface IgSession {
   token: string;
+  /** Id de la cuenta de Instagram conectada. */
   userId: string;
   username: string;
+  /** Cómo se conectó (sesiones viejas sin este campo son "instagram"). */
+  provider?: "instagram" | "facebook";
   /** Momento (ms) en que se obtuvo o renovó el token de larga duración. */
   issuedAt: number;
 }

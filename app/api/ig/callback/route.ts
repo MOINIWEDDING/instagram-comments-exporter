@@ -23,17 +23,18 @@ export async function GET(req: NextRequest) {
 
   try {
     // Instagram agrega "#_" al final del código en algunos casos.
-    const { token, userId } = await exchangeCode(
-      code.replace(/#_$/, ""),
-      redirectUri(req.nextUrl.origin),
-      config.appId,
-      config.appSecret
-    );
-    const profile = await getProfile(token);
+    const auth = await exchangeCode(code.replace(/#_$/, ""), redirectUri(req.nextUrl.origin), config);
+    const profile = await getProfile(auth);
     const res = back("conectada");
     res.cookies.set(
       SESSION_COOKIE,
-      sealSession({ token, userId: profile.userId || userId, username: profile.username, issuedAt: Date.now() }),
+      sealSession({
+        token: auth.token,
+        userId: auth.provider === "facebook" ? auth.igUserId : profile.userId || auth.igUserId,
+        username: profile.username,
+        provider: auth.provider,
+        issuedAt: Date.now(),
+      }),
       SESSION_COOKIE_OPTIONS
     );
     return res;

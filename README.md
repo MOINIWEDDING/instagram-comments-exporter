@@ -109,6 +109,21 @@ Límites de la API oficial:
    `.env.local` y en Vercel). Opcionalmente, definí `SESSION_SECRET` con un texto largo al azar.
 5. En la app, abrí **Mi cuenta → Conectar mi Instagram** y aceptá los permisos.
 
+### Alternativa: "Inicio de sesión con Facebook para empresas"
+
+Si configuraste la app con **Facebook Login for Business** (la URL de login es
+`facebook.com/dialog/oauth?...&config_id=...`), la app también funciona así: entrás con Facebook y
+se usa la cuenta de Instagram profesional vinculada a tu página de Facebook.
+
+1. Variables de entorno: `INSTAGRAM_APP_ID` = ID de la app de Facebook, `INSTAGRAM_APP_SECRET` =
+   clave secreta de la app (Configuración → Básica) y `META_LOGIN_CONFIG_ID` = el `config_id`.
+2. La configuración de inicio de sesión tiene que incluir los permisos `instagram_basic`,
+   `instagram_manage_comments`, `pages_show_list` y `pages_read_engagement`.
+3. En **Inicio de sesión con Facebook para empresas → Configuración**, agregá
+   `https://<tu-dominio>/api/ig/callback` en **URI de redireccionamiento de OAuth válidos**.
+4. Tu Instagram tiene que estar vinculado a una página de Facebook, y al conectar tenés que elegir
+   esa página y esa cuenta de Instagram.
+
 El token de acceso se guarda cifrado en una cookie del navegador (dura 60 días y se renueva solo
 mientras uses la app). "Desconectar" lo borra.
 

@@ -1,6 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { openSession, sealSession, SESSION_COOKIE, SESSION_COOKIE_OPTIONS, type IgSession } from "./ig-session";
-import { refreshToken } from "./ig-graph";
+import { refreshToken, type IgAuth } from "./ig-graph";
+
+/** Datos para llamar a la API a partir de la sesión guardada. */
+export function authFrom(session: IgSession): IgAuth {
+  return { token: session.token, provider: session.provider ?? "instagram", igUserId: session.userId };
+}
 
 // Renueva el token cuando tiene más de 7 días, para que la conexión no venza mientras se use.
 const REFRESH_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
@@ -11,7 +16,7 @@ export async function getIgSession(req: NextRequest): Promise<{ session: IgSessi
   if (!session) return null;
   if (Date.now() - session.issuedAt > REFRESH_AFTER_MS) {
     try {
-      const token = await refreshToken(session.token);
+      const token = await refreshToken(authFrom(session));
       const renewedSession = { ...session, token, issuedAt: Date.now() };
       return { session: renewedSession, renewed: sealSession(renewedSession) };
     } catch {

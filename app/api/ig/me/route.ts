@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { describeIgError, getProfile, igConfig } from "@/lib/ig-graph";
-import { getIgSession, withRenewed } from "@/lib/ig-route";
+import { authFrom, getIgSession, withRenewed } from "@/lib/ig-route";
 
 export const dynamic = "force-dynamic";
 
@@ -10,7 +10,7 @@ export async function GET(req: NextRequest) {
   const current = await getIgSession(req);
   if (!current) return NextResponse.json({ configured: true, connected: false });
   try {
-    const profile = await getProfile(current.session.token);
+    const profile = await getProfile(authFrom(current.session));
     return withRenewed(NextResponse.json({ configured: true, connected: true, profile }), current.renewed);
   } catch (err) {
     return NextResponse.json({ configured: true, connected: false, error: describeIgError(err) });

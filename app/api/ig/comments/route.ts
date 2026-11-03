@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { describeIgError, fetchMediaCommentsChunk } from "@/lib/ig-graph";
-import { getIgSession, notConnected, withRenewed } from "@/lib/ig-route";
+import { authFrom, getIgSession, notConnected, withRenewed } from "@/lib/ig-route";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
@@ -25,7 +25,7 @@ export async function POST(req: NextRequest) {
 
   try {
     const chunk = await fetchMediaCommentsChunk(
-      current.session.token,
+      authFrom(current.session),
       mediaId,
       permalink,
       after,

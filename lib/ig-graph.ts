@@ -1,13 +1,34 @@
 import type { CommentItem } from "./types";
 
-// Cliente de la API oficial de Instagram ("Instagram API with Instagram Login"). Solo funciona con
-// cuentas profesionales (Empresa o Creador) y solo da acceso a las publicaciones de la cuenta
-// conectada. Devuelve también los comentarios ocultos por el dueño (campo `hidden`).
+// Cliente de la API oficial de Instagram. Soporta las dos formas de conexión que ofrece Meta:
+// - "instagram": Instagram API with Instagram Login (se entra con el usuario de Instagram).
+// - "facebook": Facebook Login for Business (se entra con Facebook y se llega a la cuenta de
+//   Instagram a través de la página de Facebook vinculada). Se activa con META_LOGIN_CONFIG_ID.
+// Solo funciona con cuentas profesionales (Empresa o Creador) y solo da acceso a las publicaciones
+// de la cuenta conectada. Devuelve también los comentarios ocultos por el dueño (campo `hidden`).
 
-const GRAPH = "https://graph.instagram.com";
+export type IgProvider = "instagram" | "facebook";
+
+/** Datos para llamar a la API en nombre de la cuenta conectada. */
+export interface IgAuth {
+  token: string;
+  provider: IgProvider;
+  /** Id de la cuenta de Instagram (en "facebook", el instagram_business_account de la página). */
+  igUserId: string;
+}
+
 // Versión opcional de la API (p. ej. "v23.0"); sin ella se usa la versión por defecto de la app.
 const VERSION = process.env.INSTAGRAM_GRAPH_VERSION ? `/${process.env.INSTAGRAM_GRAPH_VERSION}` : "";
-const SCOPES = ["instagram_business_basic", "instagram_business_manage_comments"];
+const INSTAGRAM_SCOPES = ["instagram_business_basic", "instagram_business_manage_comments"];
+
+function graphHost(provider: IgProvider): string {
+  return provider === "facebook" ? "https://graph.facebook.com" : "https://graph.instagram.com";
+}
+
+/** Nodo de la cuenta: "/me" con Instagram Login, el id de la cuenta con Facebook Login. */
+function accountNode(auth: IgAuth): string {
+  return auth.provider === "facebook" ? `/${auth.igUserId}` : "/me";
+}
 
 export class IgGraphError extends Error {
   constructor(
@@ -19,23 +40,39 @@ export class IgGraphError extends Error {
   }
 }
 
-export function igConfig() {
-  const appId = process.env.INSTAGRAM_APP_ID;
-  const appSecret = process.env.INSTAGRAM_APP_SECRET;
+export function igConfig(): { appId: string; appSecret: string; provider: IgProvider; configId: string | null } | null {
+  const appId = process.env.INSTAGRAM_APP_ID || process.env.META_APP_ID;
+  const appSecret = process.env.INSTAGRAM_APP_SECRET || process.env.META_APP_SECRET;
   if (!appId || !appSecret) return null;
-  return { appId, appSecret };
+  const configId = process.env.META_LOGIN_CONFIG_ID || null;
+  return { appId, appSecret, provider: configId ? "facebook" : "instagram", configId };
 }
 
 export function redirectUri(origin: string): string {
   return process.env.INSTAGRAM_REDIRECT_URI || `${origin}/api/ig/callback`;
 }
 
-export function authorizeUrl(appId: string, redirect: string, state: string): string {
+export function authorizeUrl(
+  config: NonNullable<ReturnType<typeof igConfig>>,
+  redirect: string,
+  state: string
+): string {
+  if (config.provider === "facebook") {
+    // Facebook Login for Business: los permisos los define la configuración (config_id) en Meta.
+    const url = new URL(`https://www.facebook.com${VERSION}/dialog/oauth`);
+    url.searchParams.set("client_id", config.appId);
+    url.searchParams.set("config_id", config.configId!);
+    url.searchParams.set("redirect_uri", redirect);
+    url.searchParams.set("response_type", "code");
+    url.searchParams.set("override_default_response_type", "true");
+    url.searchParams.set("state", state);
+    return url.toString();
+  }
   const url = new URL("https://www.instagram.com/oauth/authorize");
-  url.searchParams.set("client_id", appId);
+  url.searchParams.set("client_id", config.appId);
   url.searchParams.set("redirect_uri", redirect);
   url.searchParams.set("response_type", "code");
-  url.searchParams.set("scope", SCOPES.join(","));
+  url.searchParams.set("scope", INSTAGRAM_SCOPES.join(","));
   url.searchParams.set("state", state);
   return url.toString();
 }
@@ -50,13 +87,28 @@ async function readJson(res: Response): Promise<any> {
   return data;
 }
 
-/** Cambia el código de autorización por un token de larga duración (60 días). */
+/**
+ * Cambia el código de autorización por un token de larga duración (60 días) y averigua la cuenta
+ * de Instagram a la que da acceso.
+ */
 export async function exchangeCode(
   code: string,
   redirect: string,
-  appId: string,
-  appSecret: string
-): Promise<{ token: string; userId: string }> {
+  config: NonNullable<ReturnType<typeof igConfig>>
+): Promise<IgAuth> {
+  const { appId, appSecret, provider } = config;
+
+  if (provider === "facebook") {
+    const shortUrl = new URL(`https://graph.facebook.com${VERSION}/oauth/access_token`);
+    shortUrl.searchParams.set("client_id", appId);
+    shortUrl.searchParams.set("client_secret", appSecret);
+    shortUrl.searchParams.set("redirect_uri", redirect);
+    shortUrl.searchParams.set("code", code);
+    const short = await readJson(await fetch(shortUrl, { cache: "no-store" }));
+    const token = await exchangeFacebookToken(short.access_token, appId, appSecret).catch(() => short.access_token);
+    return { token, provider, igUserId: await findInstagramAccount(token) };
+  }
+
   const body = new URLSearchParams({
     client_id: appId,
     client_secret: appSecret,
@@ -65,25 +117,63 @@ export async function exchangeCode(
     code,
   });
   const short = await readJson(await fetch("https://api.instagram.com/oauth/access_token", { method: "POST", body }));
-  const longUrl = new URL(`${GRAPH}/access_token`);
+  const longUrl = new URL("https://graph.instagram.com/access_token");
   longUrl.searchParams.set("grant_type", "ig_exchange_token");
   longUrl.searchParams.set("client_secret", appSecret);
   longUrl.searchParams.set("access_token", short.access_token);
   const long = await readJson(await fetch(longUrl, { cache: "no-store" }));
-  return { token: long.access_token, userId: String(short.user_id) };
+  return { token: long.access_token, provider, igUserId: String(short.user_id) };
 }
 
-/** Renueva un token de larga duración por otros 60 días. */
-export async function refreshToken(token: string): Promise<string> {
-  const url = new URL(`${GRAPH}/refresh_access_token`);
-  url.searchParams.set("grant_type", "ig_refresh_token");
-  url.searchParams.set("access_token", token);
+/** Facebook: cambia un token por uno de larga duración (sirve también para renovarlo). */
+async function exchangeFacebookToken(token: string, appId: string, appSecret: string): Promise<string> {
+  const url = new URL(`https://graph.facebook.com${VERSION}/oauth/access_token`);
+  url.searchParams.set("grant_type", "fb_exchange_token");
+  url.searchParams.set("client_id", appId);
+  url.searchParams.set("client_secret", appSecret);
+  url.searchParams.set("fb_exchange_token", token);
   const data = await readJson(await fetch(url, { cache: "no-store" }));
   return data.access_token;
 }
 
-async function graphGet(path: string, token: string, params: Record<string, string> = {}): Promise<any> {
-  const url = new URL(`${GRAPH}${VERSION}${path}`);
+/** Facebook: busca la cuenta de Instagram profesional vinculada a alguna página del usuario. */
+async function findInstagramAccount(token: string): Promise<string> {
+  const data = await graphGet("facebook", "/me/accounts", token, {
+    fields: "id,name,instagram_business_account",
+    limit: "100",
+  });
+  const page = (data.data ?? []).find((p: any) => p.instagram_business_account?.id);
+  if (!page) {
+    throw new IgGraphError(
+      "No se encontró una cuenta de Instagram profesional vinculada a tus páginas de Facebook. Vinculá tu Instagram a una página y, al conectar, elegí esa página y esa cuenta.",
+      400,
+      -1
+    );
+  }
+  return String(page.instagram_business_account.id);
+}
+
+/** Renueva un token de larga duración por otros 60 días. */
+export async function refreshToken(auth: IgAuth): Promise<string> {
+  if (auth.provider === "facebook") {
+    const config = igConfig();
+    if (!config) throw new Error("Falta configurar la app de Meta.");
+    return exchangeFacebookToken(auth.token, config.appId, config.appSecret);
+  }
+  const url = new URL("https://graph.instagram.com/refresh_access_token");
+  url.searchParams.set("grant_type", "ig_refresh_token");
+  url.searchParams.set("access_token", auth.token);
+  const data = await readJson(await fetch(url, { cache: "no-store" }));
+  return data.access_token;
+}
+
+async function graphGet(
+  provider: IgProvider,
+  path: string,
+  token: string,
+  params: Record<string, string> = {}
+): Promise<any> {
+  const url = new URL(`${graphHost(provider)}${VERSION}${path}`);
   for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
   url.searchParams.set("access_token", token);
   return graphGetUrl(url.toString());
@@ -108,15 +198,18 @@ export interface IgProfile {
   mediaCount: number | null;
 }
 
-export async function getProfile(token: string): Promise<IgProfile> {
-  const data = await graphGet("/me", token, {
-    fields: "user_id,username,name,account_type,profile_picture_url,media_count",
+export async function getProfile(auth: IgAuth): Promise<IgProfile> {
+  const data = await graphGet(auth.provider, accountNode(auth), auth.token, {
+    fields:
+      auth.provider === "facebook"
+        ? "id,username,name,profile_picture_url,media_count"
+        : "user_id,username,name,account_type,profile_picture_url,media_count",
   });
   return {
     userId: String(data.user_id ?? data.id),
     username: data.username,
     name: data.name ?? null,
-    accountType: data.account_type ?? null,
+    accountType: data.account_type ?? (auth.provider === "facebook" ? "BUSINESS" : null),
     profilePictureUrl: data.profile_picture_url ?? null,
     mediaCount: data.media_count ?? null,
   };
@@ -133,13 +226,13 @@ export interface IgMedia {
   likeCount: number | null;
 }
 
-export async function listMedia(token: string, after: string | null): Promise<{ media: IgMedia[]; next: string | null }> {
+export async function listMedia(auth: IgAuth, after: string | null): Promise<{ media: IgMedia[]; next: string | null }> {
   const params: Record<string, string> = {
     fields: "id,caption,media_type,media_url,thumbnail_url,permalink,timestamp,comments_count,like_count",
     limit: "24",
   };
   if (after) params.after = after;
-  const data = await graphGet("/me/media", token, params);
+  const data = await graphGet(auth.provider, `${accountNode(auth)}/media`, auth.token, params);
   const media: IgMedia[] = (data.data ?? []).map((m: any) => ({
     id: String(m.id),
     caption: m.caption ?? null,
@@ -179,7 +272,7 @@ function mapComment(c: any, permalink: string, parentId: string | null): Comment
  * el tiempo. Devuelve el cursor para seguir en otro pedido si quedan más.
  */
 export async function fetchMediaCommentsChunk(
-  token: string,
+  auth: IgAuth,
   mediaId: string,
   permalink: string,
   after: string | null,
@@ -194,7 +287,7 @@ export async function fetchMediaCommentsChunk(
       limit: "50",
     };
     if (cursor) params.after = cursor;
-    const data = await graphGet(`/${mediaId}/comments`, token, params);
+    const data = await graphGet(auth.provider, `/${mediaId}/comments`, auth.token, params);
 
     for (const c of data.data ?? []) {
       comments.push(mapComment(c, permalink, null));
@@ -218,6 +311,7 @@ export async function fetchMediaCommentsChunk(
 /** Mensaje entendible para los errores más comunes de la API. */
 export function describeIgError(err: unknown): string {
   if (err instanceof IgGraphError) {
+    if (err.code === -1) return err.message;
     if (err.code === 190 || err.status === 401) {
       return "La conexión con Instagram venció o fue revocada: volvé a conectar tu cuenta.";
     }
