@@ -29,6 +29,9 @@ export function toCsv(input: ExportInput): string {
   const header = ["usuario", "comentario"];
   if (withAnalysis) header.push("sentimiento");
   if (withAnalysis && input.filters.length > 0) header.push("temas");
+  // La columna "oculto" solo aparece con publicaciones de la cuenta conectada.
+  const withHidden = input.results.some((r) => r.mode === "account");
+  if (withHidden) header.push("oculto");
   const rows = [header.join(",")];
 
   const escape = (value: string) => `"${value.replace(/"/g, '""')}"`;
@@ -41,6 +44,7 @@ export function toCsv(input: ExportInput): string {
         row.push(escape(sentiment ? SENTIMENT_LABELS[sentiment] : ""));
       }
       if (withAnalysis && input.filters.length > 0) row.push(escape(filterNames(c, input)));
+      if (withHidden) row.push(escape(c.hidden ? "sí" : "no"));
       rows.push(row.join(","));
     }
   }

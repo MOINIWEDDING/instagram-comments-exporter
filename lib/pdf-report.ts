@@ -1105,7 +1105,7 @@ export async function renderPdfReport(input: ExportInput) {
       for (const c of r.comments) {
         const a = analysis?.[c.commentId];
         if (!a?.filterIds.includes(f.id)) continue;
-        rows.push([`@${clean(c.username)}`, cleanComment(c.text), `#${videoIndex + 1}`, SENTIMENT_LABELS[a.sentiment]]);
+        rows.push([`@${clean(c.username)}${c.hidden ? " (oculto)" : ""}`, cleanComment(c.text), `#${videoIndex + 1}`, SENTIMENT_LABELS[a.sentiment]]);
       }
     });
     if (rows.length === 0) continue;
@@ -1136,7 +1136,7 @@ export async function renderPdfReport(input: ExportInput) {
     if (withTopics) head.push("Temas");
     const body = result.comments.map((c) => {
       const row = [
-        `@${clean(c.username)}`,
+        `@${clean(c.username)}${c.hidden ? " (oculto)" : ""}`,
         cleanComment(c.text),
         formatDate(c.timestamp),
         c.likeCount != null ? String(c.likeCount) : "—",

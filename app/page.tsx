@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type {
   AiInsights,
   AnalyzeResponse,
@@ -190,6 +190,61 @@ function IconInbox() {
   );
 }
 
+interface IgProfile {
+  userId: string;
+  username: string;
+  name: string | null;
+  accountType: string | null;
+  profilePictureUrl: string | null;
+  mediaCount: number | null;
+}
+
+interface IgMedia {
+  id: string;
+  caption: string | null;
+  mediaType: string;
+  thumbnailUrl: string | null;
+  permalink: string;
+  timestamp: string | null;
+  commentsCount: number | null;
+  likeCount: number | null;
+}
+
+interface IgStatus {
+  configured: boolean;
+  connected: boolean;
+  profile?: IgProfile;
+  error?: string;
+}
+
+const ACCOUNT_NOTICES: Record<string, { tone: "ok" | "error"; text: string }> = {
+  conectada: { tone: "ok", text: "Tu cuenta de Instagram quedó conectada." },
+  cancelada: { tone: "error", text: "Cancelaste la conexión con Instagram." },
+  error: { tone: "error", text: "No se pudo conectar la cuenta. Revisá la configuración de la app de Meta y volvé a intentar." },
+  "sin-configurar": { tone: "error", text: "Falta configurar INSTAGRAM_APP_ID e INSTAGRAM_APP_SECRET (ver README.md)." },
+};
+
+const MAX_SELECTED_MEDIA = 10;
+
+function IconUserCircle() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="12" cy="12" r="10" />
+      <circle cx="12" cy="10" r="3" />
+      <path d="M6.2 18.4a7 7 0 0 1 11.6 0" />
+    </svg>
+  );
+}
+
+function IconLink() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M10 13a5 5 0 0 0 7.07 0l3-3a5 5 0 0 0-7.07-7.07l-1.5 1.5" />
+      <path d="M14 11a5 5 0 0 0-7.07 0l-3 3a5 5 0 0 0 7.07 7.07l1.5-1.5" />
+    </svg>
+  );
+}
+
 export default function Home() {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -211,6 +266,73 @@ export default function Home() {
   const [analyzedFilters, setAnalyzedFilters] = useState<CustomFilter[]>([]);
   const [sentimentFilter, setSentimentFilter] = useState<SentimentFilter>("all");
   const [topicFilter, setTopicFilter] = useState<string>("all");
+
+  // Cuenta propia conectada con la API oficial de Instagram
+  const [source, setSource] = useState<"links" | "account">("links");
+  const [igStatus, setIgStatus] = useState<IgStatus | null>(null);
+  const [accountNotice, setAccountNotice] = useState<{ tone: "ok" | "error"; text: string } | null>(null);
+  const [media, setMedia] = useState<IgMedia[]>([]);
+  const [mediaNext, setMediaNext] = useState<string | null>(null);
+  const [mediaLoading, setMediaLoading] = useState(false);
+  const [mediaError, setMediaError] = useState<string | null>(null);
+  const [selectedMedia, setSelectedMedia] = useState<string[]>([]);
+
+  async function loadMedia(after: string | null) {
+    setMediaLoading(true);
+    setMediaError(null);
+    try {
+      const res = await fetch(`/api/ig/media${after ? `?after=${encodeURIComponent(after)}` : ""}`);
+      const data = await res.json();
+      if (!res.ok) {
+        setMediaError(data.error ?? "No se pudieron cargar tus publicaciones.");
+        return;
+      }
+      setMedia((prev) => (after ? [...prev, ...data.media] : data.media));
+      setMediaNext(data.next);
+    } catch (err) {
+      setMediaError(err instanceof Error ? err.message : "Error de red.");
+    } finally {
+      setMediaLoading(false);
+    }
+  }
+
+  async function loadAccount() {
+    try {
+      const res = await fetch("/api/ig/me");
+      const status = (await res.json()) as IgStatus;
+      setIgStatus(status);
+      if (status.connected) await loadMedia(null);
+    } catch {
+      setIgStatus({ configured: false, connected: false });
+    }
+  }
+
+  useEffect(() => {
+    // Al volver de Instagram, la URL trae ?cuenta=… con el resultado de la conexión.
+    const params = new URLSearchParams(window.location.search);
+    const notice = params.get("cuenta");
+    if (notice) {
+      setSource("account");
+      setAccountNotice(ACCOUNT_NOTICES[notice] ?? null);
+      window.history.replaceState(null, "", window.location.pathname);
+    }
+    void loadAccount();
+  }, []);
+
+  async function handleDisconnect() {
+    await fetch("/api/ig/logout", { method: "POST" });
+    setIgStatus((prev) => (prev ? { ...prev, connected: false, profile: undefined } : prev));
+    setMedia([]);
+    setMediaNext(null);
+    setSelectedMedia([]);
+    setAccountNotice(null);
+  }
+
+  function toggleMedia(id: string) {
+    setSelectedMedia((prev) =>
+      prev.includes(id) ? prev.filter((m) => m !== id) : prev.length >= MAX_SELECTED_MEDIA ? prev : [...prev, id]
+    );
+  }
 
   const lineCount = input.split("\n").map((l) => l.trim()).filter(Boolean).length;
 
@@ -340,6 +462,72 @@ export default function Home() {
     }
   }
 
+  function startLoading() {
+    setLoading(true);
+    setRequestError(null);
+    setAnalysis(null);
+    setAnalysisEngine(null);
+    setAnalysisWarning(null);
+    setInsights(null);
+    setAnalysisError(null);
+    setSentimentFilter("all");
+    setTopicFilter("all");
+  }
+
+  // Comentarios de publicaciones propias con la API oficial (incluye los ocultos).
+  async function handleAccountSubmit() {
+    const chosen = media.filter((m) => selectedMedia.includes(m.id));
+    if (chosen.length === 0) {
+      setRequestError("Elegí al menos una publicación.");
+      return;
+    }
+    startLoading();
+    try {
+      const collected: ScrapeResult[] = [];
+      for (const [index, item] of chosen.entries()) {
+        const result: ScrapeResult = {
+          url: item.permalink,
+          shortcode: item.permalink.match(/\/(?:p|reel|reels|tv)\/([A-Za-z0-9_-]+)/)?.[1] ?? null,
+          ok: false,
+          mode: "account",
+          comments: [],
+          reportedCount: item.commentsCount,
+        };
+        const seen = new Set<string>();
+        let after: string | null = null;
+        setProgress({ video: index + 1, videos: chosen.length, fetched: 0 });
+        do {
+          const res: Response = await fetch("/api/ig/comments", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ mediaId: item.id, permalink: item.permalink, after }),
+          });
+          const data: { comments?: CommentItem[]; next?: string | null; error?: string } = await res.json();
+          if (!res.ok) {
+            result.error = data.error ?? "No se pudieron leer los comentarios.";
+            break;
+          }
+          for (const c of data.comments ?? []) {
+            if (seen.has(c.commentId)) continue;
+            seen.add(c.commentId);
+            result.comments.push(c);
+          }
+          after = data.next && data.next !== after ? data.next : null;
+          setProgress({ video: index + 1, videos: chosen.length, fetched: result.comments.length });
+        } while (after && result.comments.length < MAX_COMMENTS_PER_VIDEO);
+        result.comments = groupReplies(result.comments);
+        result.ok = result.comments.length > 0;
+        collected.push(result);
+      }
+      setResults(collected);
+    } catch (err) {
+      setRequestError(err instanceof Error ? err.message : "Error de red.");
+    } finally {
+      setLoading(false);
+      setProgress(null);
+    }
+  }
+
   async function handleSubmit() {
     const urls = input
       .split("\n")
@@ -355,15 +543,7 @@ export default function Home() {
       return;
     }
 
-    setLoading(true);
-    setRequestError(null);
-    setAnalysis(null);
-    setAnalysisEngine(null);
-    setAnalysisWarning(null);
-    setInsights(null);
-    setAnalysisError(null);
-    setSentimentFilter("all");
-    setTopicFilter("all");
+    startLoading();
     try {
       const collected: ScrapeResult[] = [];
       for (const [index, url] of urls.entries()) {
@@ -503,47 +683,203 @@ export default function Home() {
       </div>
 
       <div className="hero">
-        <h2>Pega tus videos, obtén los comentarios</h2>
+        <h2>{source === "links" ? "Pega tus videos, obtén los comentarios" : "Tus publicaciones, todos sus comentarios"}</h2>
         <p>
-          Una o varias URLs de reels o videos públicos de Instagram, una por línea. Vas a ver los
-          comentarios organizados por video y podrás exportarlos todos a CSV.
+          {source === "links"
+            ? "Una o varias URLs de reels o videos públicos de Instagram, una por línea. Vas a ver los comentarios organizados por video y podrás exportarlos a CSV o PDF."
+            : "Conectá tu cuenta de Instagram, elegí una o varias publicaciones y extraé todos sus comentarios con la API oficial, incluidos los que ocultaste."}
         </p>
       </div>
 
-      <div className="notice">
-        <IconAlertTriangle />
-        <span>
-          Este proyecto usa métodos no oficiales de Instagram, por lo que puede dejar de funcionar
-          sin aviso o requerir una sesión autenticada. Para resultados confiables, configura{" "}
-          <code>IG_SESSIONID</code> (y opcionalmente <code>IG_DS_USER_ID</code> /{" "}
-          <code>IG_CSRFTOKEN</code>) con la cookie de sesión de una cuenta tuya de Instagram. Ver{" "}
-          <code>README.md</code>.
-        </span>
+      <div className="source-tabs" role="tablist" aria-label="Origen de los comentarios">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={source === "links"}
+          className={source === "links" ? "active" : undefined}
+          onClick={() => setSource("links")}
+        >
+          <IconLink />
+          Por enlace
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={source === "account"}
+          className={source === "account" ? "active" : undefined}
+          onClick={() => setSource("account")}
+        >
+          <IconUserCircle />
+          Mi cuenta
+          {igStatus?.connected && igStatus.profile && <span className="tab-meta">@{igStatus.profile.username}</span>}
+        </button>
       </div>
 
-      <div className="card">
-        <div className="card-label-row">
-          <label htmlFor="urls">URLs de Instagram</label>
-          {lineCount > 0 && (
-            <span className="line-count">
-              {lineCount} {lineCount === 1 ? "video" : "videos"}
-            </span>
-          )}
+      {source === "links" && (
+        <div className="notice">
+          <IconAlertTriangle />
+          <span>
+            Este modo usa métodos no oficiales de Instagram, por lo que puede dejar de funcionar sin
+            aviso o requerir una sesión autenticada. Para resultados confiables, configura{" "}
+            <code>IG_SESSIONID</code> (y opcionalmente <code>IG_DS_USER_ID</code> /{" "}
+            <code>IG_CSRFTOKEN</code>) con la cookie de sesión de una cuenta tuya de Instagram. Ver{" "}
+            <code>README.md</code>.
+          </span>
         </div>
-        <textarea
-          id="urls"
-          placeholder={"https://www.instagram.com/reel/XXXXXXXXXXX/\nhttps://www.instagram.com/p/YYYYYYYYYYY/"}
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-        />
+      )}
+
+      <div className="card">
+        {source === "links" ? (
+          <>
+            <div className="card-label-row">
+              <label htmlFor="urls">URLs de Instagram</label>
+              {lineCount > 0 && (
+                <span className="line-count">
+                  {lineCount} {lineCount === 1 ? "video" : "videos"}
+                </span>
+              )}
+            </div>
+            <textarea
+              id="urls"
+              placeholder={"https://www.instagram.com/reel/XXXXXXXXXXX/\nhttps://www.instagram.com/p/YYYYYYYYYYY/"}
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+            />
+          </>
+        ) : (
+          <div className="account-panel">
+            {accountNotice && (
+              <div className={accountNotice.tone === "ok" ? "account-notice ok" : "request-error"}>
+                {accountNotice.tone === "ok" ? <IconUserCircle /> : <IconAlertCircle />}
+                <span>{accountNotice.text}</span>
+              </div>
+            )}
+            {!igStatus ? (
+              <div className="skeleton-line" style={{ width: "50%" }} />
+            ) : !igStatus.configured ? (
+              <div className="account-empty">
+                <h3>Falta configurar la conexión</h3>
+                <p>
+                  Para conectar tu cuenta hay que crear una app en Meta for Developers y agregar{" "}
+                  <code>INSTAGRAM_APP_ID</code> e <code>INSTAGRAM_APP_SECRET</code> a las variables de
+                  entorno. Los pasos están en <code>README.md</code>.
+                </p>
+              </div>
+            ) : !igStatus.connected ? (
+              <div className="account-empty">
+                <h3>Conectá tu cuenta de Instagram</h3>
+                <p>
+                  Vas a poder elegir tus publicaciones y extraer todos sus comentarios con la API oficial
+                  de Instagram, incluidos los que ocultaste. Tu cuenta tiene que ser profesional (Empresa o
+                  Creador); el cambio es gratis desde la configuración de Instagram.
+                </p>
+                {igStatus.error && (
+                  <div className="request-error">
+                    <IconAlertCircle />
+                    <span>{igStatus.error}</span>
+                  </div>
+                )}
+                <a className="btn-primary btn-link" href="/api/ig/login">
+                  <IconUserCircle />
+                  Conectar mi Instagram
+                </a>
+              </div>
+            ) : (
+              <>
+                <div className="account-header">
+                  {igStatus.profile?.profilePictureUrl ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img className="account-avatar" src={igStatus.profile.profilePictureUrl} alt="" referrerPolicy="no-referrer" />
+                  ) : (
+                    <span className="account-avatar avatar" style={{ background: avatarColor(igStatus.profile?.username ?? "") }}>
+                      {initials(igStatus.profile?.username ?? "")}
+                    </span>
+                  )}
+                  <div className="account-header-text">
+                    <strong>@{igStatus.profile?.username}</strong>
+                    <span>
+                      {igStatus.profile?.mediaCount != null ? `${igStatus.profile.mediaCount} publicaciones · ` : ""}
+                      Elegí hasta {MAX_SELECTED_MEDIA} para extraer sus comentarios
+                    </span>
+                  </div>
+                  <button type="button" className="btn-secondary btn-small" onClick={handleDisconnect}>
+                    Desconectar
+                  </button>
+                </div>
+
+                {mediaError && (
+                  <div className="request-error">
+                    <IconAlertCircle />
+                    <span>{mediaError}</span>
+                  </div>
+                )}
+
+                <div className="media-grid">
+                  {media.map((m) => {
+                    const selected = selectedMedia.includes(m.id);
+                    return (
+                      <button
+                        type="button"
+                        key={m.id}
+                        className={`media-tile${selected ? " selected" : ""}`}
+                        onClick={() => toggleMedia(m.id)}
+                        aria-pressed={selected}
+                        title={m.caption ?? undefined}
+                      >
+                        <span className="media-thumb">
+                          {m.thumbnailUrl ? (
+                            // eslint-disable-next-line @next/next/no-img-element
+                            <img src={m.thumbnailUrl} alt="" loading="lazy" referrerPolicy="no-referrer" />
+                          ) : (
+                            <IconCamera />
+                          )}
+                          {m.mediaType === "VIDEO" && <span className="media-type">Reel</span>}
+                          {m.mediaType === "CAROUSEL_ALBUM" && <span className="media-type">Carrusel</span>}
+                          <span className="media-check" aria-hidden="true">
+                            {selected ? "✓" : ""}
+                          </span>
+                        </span>
+                        <span className="media-meta">
+                          <span className="media-count">{m.commentsCount ?? 0} comentarios</span>
+                          {m.timestamp && (
+                            <span className="media-date">{new Date(m.timestamp).toLocaleDateString("es-ES")}</span>
+                          )}
+                        </span>
+                        <span className="media-caption">{m.caption || "Sin descripción"}</span>
+                      </button>
+                    );
+                  })}
+                  {mediaLoading &&
+                    Array.from({ length: media.length === 0 ? 6 : 3 }).map((_, i) => (
+                      <span className="media-tile media-skeleton" key={`s${i}`} />
+                    ))}
+                </div>
+                {!mediaLoading && media.length === 0 && !mediaError && (
+                  <p className="filter-empty">Tu cuenta todavía no tiene publicaciones.</p>
+                )}
+                {mediaNext && !mediaLoading && (
+                  <button type="button" className="btn-secondary btn-small media-more" onClick={() => loadMedia(mediaNext)}>
+                    Cargar más publicaciones
+                  </button>
+                )}
+              </>
+            )}
+          </div>
+        )}
         <div className="actions">
-          <button className="btn-primary" onClick={handleSubmit} disabled={loading}>
+          <button
+            className="btn-primary"
+            onClick={source === "links" ? handleSubmit : handleAccountSubmit}
+            disabled={loading || (source === "account" && (!igStatus?.connected || selectedMedia.length === 0))}
+          >
             {loading && <span className="spinner" />}
             {loading
               ? progress
                 ? `Obteniendo comentarios… ${progress.fetched}${progress.videos > 1 ? ` (video ${progress.video} de ${progress.videos})` : ""}`
                 : "Obteniendo comentarios…"
-              : "Obtener comentarios"}
+              : source === "account" && selectedMedia.length > 0
+                ? `Obtener comentarios (${selectedMedia.length})`
+                : "Obtener comentarios"}
           </button>
           <button
             className="btn-secondary"
@@ -840,8 +1176,10 @@ export default function Home() {
                   <p className="count-detail">
                     Leídos: {topLevel} comentarios principales y {replies}
                     {full.expectedReplies ? ` de ${full.expectedReplies}` : ""} respuestas. Instagram informa{" "}
-                    {full.reportedCount} en total; la diferencia suele ser de comentarios ocultos por
-                    Instagram (spam u ofensivos), borrados o de cuentas restringidas, que no se pueden leer.
+                    {full.reportedCount} en total;{" "}
+                    {full.mode === "account"
+                      ? "la diferencia suele ser de comentarios eliminados o de cuentas restringidas, que la API oficial no devuelve (los que ocultaste sí están incluidos)."
+                      : "la diferencia suele ser de comentarios ocultos por Instagram (spam u ofensivos), borrados o de cuentas restringidas, que no se pueden leer."}
                   </p>
                 );
               })()}
@@ -869,6 +1207,7 @@ export default function Home() {
                               {initials(c.username)}
                             </span>
                             <span className="username">@{c.username}</span>
+                            {c.hidden && <span className="hidden-badge">Oculto</span>}
                           </div>
                         </td>
                         <td data-label="Comentario">
@@ -916,8 +1255,9 @@ export default function Home() {
         <div className="empty-state">
           <IconInbox />
           <p>
-            Todavía no pediste ningún comentario. Pega arriba una o más URLs de reels/videos y
-            presioná “Obtener comentarios”.
+            {source === "links"
+              ? "Todavía no pediste ningún comentario. Pega arriba una o más URLs de reels/videos y presioná “Obtener comentarios”."
+              : "Todavía no pediste ningún comentario. Elegí arriba una o más publicaciones y presioná “Obtener comentarios”."}
           </p>
         </div>
       )}

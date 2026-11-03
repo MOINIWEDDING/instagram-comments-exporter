@@ -7,6 +7,8 @@ export interface CommentItem {
   text: string;
   timestamp: number | null;
   likeCount: number | null;
+  /** Oculto por el dueño de la publicación (solo disponible en publicaciones de la cuenta conectada). */
+  hidden?: boolean;
 }
 
 export interface ScrapeResult {
@@ -14,7 +16,8 @@ export interface ScrapeResult {
   shortcode: string | null;
   ok: boolean;
   error?: string;
-  mode: "authenticated" | "anonymous" | "none";
+  /** "account": leído con la API oficial desde la cuenta de Instagram conectada. */
+  mode: "authenticated" | "anonymous" | "account" | "none";
   comments: CommentItem[];
   /** Total de comentarios que informa Instagram para la publicación (incluye ocultos y borrados). */
   reportedCount?: number | null;

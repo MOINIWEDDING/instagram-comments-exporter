@@ -159,6 +159,10 @@ export function computeReportStats(
   takeaways.push(
     `Cada comentario recibe en promedio ${avgLikes.toFixed(1).replace(".", ",")} likes; el más apoyado llega a ${formatNumber(maxLikes)}.`
   );
+  const hiddenCount = all.filter((c) => c.hidden).length;
+  if (hiddenCount > 0) {
+    takeaways.push(`${hiddenCount} ${hiddenCount === 1 ? "comentario está oculto" : "comentarios están ocultos"} en la publicación y se incluyen en este reporte.`);
+  }
   const topTopic = topics.find((t) => t.count > 0);
   if (topTopic) {
     takeaways.push(`El tema más mencionado es "${topTopic.filter.name}", con ${topTopic.count} comentarios.`);
@@ -233,6 +237,6 @@ export function computeReportStats(
     peakDays,
     strengths: strengths.slice(0, 3),
     attention: attention.slice(0, 3),
-    takeaways: takeaways.slice(0, 4),
+    takeaways: takeaways.slice(0, 5),
   };
 }

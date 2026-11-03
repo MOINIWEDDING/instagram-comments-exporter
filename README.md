@@ -81,6 +81,37 @@ la primera vez (`npx vercel login`) y vincular el proyecto (`npx vercel link`).
   marcadas con un ícono), analizar/filtrar los comentarios y exportarlos.
 - `lib/export.ts`: generación del CSV y del PDF.
 
+## Conectar tu propia cuenta (pestaña "Mi cuenta")
+
+Además de extraer comentarios por enlace (de cualquier cuenta), podés conectar tu cuenta de
+Instagram con la API oficial de Meta, elegir tus publicaciones en una grilla y extraer todos sus
+comentarios, **incluidos los que ocultaste** (aparecen marcados como "Oculto"). Sin cookies ni
+métodos no oficiales.
+
+Límites de la API oficial:
+
+- Solo cuentas **profesionales** (Empresa o Creador). El cambio es gratis en Instagram →
+  Configuración → Tipo de cuenta.
+- Solo da acceso a las publicaciones de la cuenta conectada.
+- Los comentarios **eliminados no se pueden recuperar**: Instagram los borra y ninguna API los
+  devuelve.
+
+### Configuración (una sola vez)
+
+1. Entrá a [developers.facebook.com](https://developers.facebook.com/apps), creá una app y agregá
+   el producto **Instagram** → **"API setup with Instagram login"**.
+2. En **"Set up Instagram business login"**, agregá como URL de redireccionamiento
+   `https://<tu-dominio>/api/ig/callback` (por ejemplo la URL de Vercel). Meta exige HTTPS.
+3. Mientras la app esté en modo desarrollo, agregá tu cuenta de Instagram en **Roles → Instagram
+   testers** y aceptá la invitación desde Instagram (Configuración → Apps y sitios web).
+4. Copiá el **Instagram app ID** y el **Instagram app secret** (de la sección de Instagram, no los
+   de Facebook) a las variables de entorno `INSTAGRAM_APP_ID` e `INSTAGRAM_APP_SECRET` (en
+   `.env.local` y en Vercel). Opcionalmente, definí `SESSION_SECRET` con un texto largo al azar.
+5. En la app, abrí **Mi cuenta → Conectar mi Instagram** y aceptá los permisos.
+
+El token de acceso se guarda cifrado en una cookie del navegador (dura 60 días y se renueva solo
+mientras uses la app). "Desconectar" lo borra.
+
 ## Análisis de sentimiento y filtros por tema
 
 Después de obtener los comentarios aparece el panel **Análisis y filtros**:
