@@ -106,7 +106,8 @@ export async function exchangeCode(
     shortUrl.searchParams.set("code", code);
     const short = await readJson(await fetch(shortUrl, { cache: "no-store" }));
     const token = await exchangeFacebookToken(short.access_token, appId, appSecret).catch(() => short.access_token);
-    return { token, provider, igUserId: await findInstagramAccount(token, appId, appSecret) };
+    const account = await findInstagramAccount(token, appId, appSecret);
+    return { token, provider: account.provider, igUserId: account.id };
   }
 
   const body = new URLSearchParams({
@@ -146,9 +147,33 @@ async function exchangeFacebookToken(token: string, appId: string, appSecret: st
  * 3. Los portfolios empresariales del usuario (inicio de sesión unificado con activos de empresa).
  * Si nada funciona, el error resume lo que devolvió cada intento, para poder diagnosticarlo.
  */
-async function findInstagramAccount(token: string, appId: string, appSecret: string): Promise<string> {
+async function findInstagramAccount(
+  token: string,
+  appId: string,
+  appSecret: string
+): Promise<{ id: string; provider: IgProvider }> {
+  const fb = (id: string) => ({ id, provider: "facebook" as const });
   const notes: string[] = [];
   const errorText = (err: unknown) => (err instanceof Error ? err.message : String(err)).slice(0, 120);
+
+  // 0. ID indicado a mano (INSTAGRAM_ACCOUNT_ID): se verifica que el token tenga acceso.
+  const manualId = process.env.INSTAGRAM_ACCOUNT_ID?.trim();
+  if (manualId) {
+    try {
+      const account = await graphGet("facebook", `/${manualId}`, token, { fields: "id,username" });
+      if (account?.id) return fb(String(account.id));
+    } catch (err) {
+      notes.push(`INSTAGRAM_ACCOUNT_ID ${manualId}: sin acceso (${errorText(err)})`);
+    }
+  }
+
+  // Inicio de sesión unificado: el token puede servir también en la API de Instagram.
+  try {
+    const me = await graphGet("instagram", "/me", token, { fields: "user_id,username" });
+    if (me?.user_id || me?.id) return { id: String(me.user_id ?? me.id), provider: "instagram" };
+  } catch (err) {
+    notes.push(`API de Instagram: ${errorText(err)}`);
+  }
 
   // 1. Páginas
   try {
@@ -158,7 +183,7 @@ async function findInstagramAccount(token: string, appId: string, appSecret: str
     });
     const pages: any[] = data.data ?? [];
     const page = pages.find((p) => p.instagram_business_account?.id || p.connected_instagram_account?.id);
-    if (page) return String(page.instagram_business_account?.id ?? page.connected_instagram_account.id);
+    if (page) return fb(String(page.instagram_business_account?.id ?? page.connected_instagram_account.id));
     notes.push(
       pages.length === 0
         ? "páginas: ninguna compartida"
@@ -181,7 +206,7 @@ async function findInstagramAccount(token: string, appId: string, appSecret: str
     );
 
     const igTarget = scopes.find((s) => s.scope.startsWith("instagram_") && s.target_ids?.length)?.target_ids?.[0];
-    if (igTarget) return String(igTarget);
+    if (igTarget) return fb(String(igTarget));
 
     // Ids de páginas autorizadas: se busca la cuenta de Instagram vinculada a cada una.
     const pageIds = [...new Set(scopes.filter((s) => s.scope.startsWith("pages_")).flatMap((s) => s.target_ids ?? []))];
@@ -191,7 +216,7 @@ async function findInstagramAccount(token: string, appId: string, appSecret: str
           fields: "instagram_business_account,connected_instagram_account",
         });
         const igId = page.instagram_business_account?.id ?? page.connected_instagram_account?.id;
-        if (igId) return String(igId);
+        if (igId) return fb(String(igId));
       } catch {
         // Se sigue con la siguiente página.
       }
@@ -208,7 +233,7 @@ async function findInstagramAccount(token: string, appId: string, appSecret: str
     });
     for (const business of data.data ?? []) {
       const ig = business.instagram_business_accounts?.data?.[0] ?? business.owned_instagram_accounts?.data?.[0];
-      if (ig?.id) return String(ig.id);
+      if (ig?.id) return fb(String(ig.id));
     }
     notes.push(`portfolios: ${(data.data ?? []).length} sin cuenta de Instagram`);
   } catch (err) {
@@ -224,7 +249,7 @@ async function findInstagramAccount(token: string, appId: string, appSecret: str
     );
   }
   throw new IgGraphError(
-    `No se encontró la cuenta de Instagram autorizada. Al conectar, marcá tu cuenta de Instagram en el paso de activos. Detalle: ${notes.join(" · ")}`,
+    `No se encontró la cuenta de Instagram autorizada. Cargá en Vercel la variable INSTAGRAM_ACCOUNT_ID con el ID de tu cuenta de Instagram (lo muestra Meta en el panel de la app, en "Genera identificadores de acceso") y volvé a conectar. Detalle: ${notes.join(" · ")}`,
     400,
     -1
   );
